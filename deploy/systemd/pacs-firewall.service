@@ -1,0 +1,22 @@
+# Firewall fuer die von Docker veroeffentlichten Ports (server/firewall.py, /admin/ Reiter Firewall). Setzt die Kette
+# PACS-SPERRE nach jedem Start von Docker neu, weil Docker DOCKER-USER beim Start neu anlegt.
+# Applies the iptables rules for Docker-published ports after every Docker start.
+# Erwartet das Repo unter /opt/pacs-admin (sonst die Pfade anpassen). Einstellungen in /etc/default/pacs-admin.
+# Einrichten: cp deploy/systemd/pacs-firewall.service /etc/systemd/system/ && systemctl enable --now pacs-firewall
+# Ohne PACS_DIR/firewall.json gilt der Standard-Regelsatz (FW_DEFAULT_RULES oder eingebaut), vorher pruefen mit
+# python3 /opt/pacs-admin/server/firewall.py status
+[Unit]
+Description=PACS-Firewall: veroeffentlichte Docker-Ports von aussen filtern (firewall.py, /admin/ Reiter Firewall)
+After=docker.service
+Requires=docker.service
+PartOf=docker.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+EnvironmentFile=-/etc/default/pacs-admin
+ExecStart=/usr/bin/python3 /opt/pacs-admin/server/firewall.py start
+ExecStop=/usr/bin/python3 /opt/pacs-admin/server/firewall.py stop
+
+[Install]
+WantedBy=multi-user.target docker.service

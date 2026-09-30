@@ -1,0 +1,20 @@
+# Hilfsdienst fuer /admin/ (server/verwaltung-dienst.py): Platten-Assistent, Firewall, Protokoll-Datenbank.
+# Helper service for the admin panel. Listens only on the unix sockets PACS_SOCKET and PACS_LOG_SOCKET.
+# Erwartet das Repo unter /opt/pacs-admin (sonst die Pfade in ExecStart anpassen). Einstellungen in
+# /etc/default/pacs-admin (Beispiel deploy/pacs-admin.env.example), ohne die Datei gelten die Standardwerte.
+# Einrichten: cp deploy/systemd/pacs-verwaltung.service /etc/systemd/system/ && systemctl enable --now pacs-verwaltung
+# Das Socket-Verzeichnis (Standard /run/pacs-admin) muss in den nginx-Container gemountet sein. Der Dienst legt es
+# selbst an; die Sockets gehoeren PACS_SOCKET_UID (Standard 101 = nginx im offiziellen nginx-Image), Rechte 0600.
+# Kein RuntimeDirectory=: systemd wuerde das Verzeichnis beim Stoppen loeschen und der Mount im Container ginge ins Leere.
+[Unit]
+Description=PACS-Verwaltung: Hilfsdienst fuer /admin/ (Unix-Sockets, siehe verwaltung-dienst.py)
+After=docker.service
+
+[Service]
+EnvironmentFile=-/etc/default/pacs-admin
+ExecStart=/usr/bin/python3 /opt/pacs-admin/server/verwaltung-dienst.py
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

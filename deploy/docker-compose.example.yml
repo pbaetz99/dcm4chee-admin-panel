@@ -1,0 +1,91 @@
+# OHIF-Viewer mit PACS-Verwaltung (/admin/) und Anmeldung ueber oauth2-proxy (Entra ID oder ein anderer OIDC-Anbieter).
+# English: example compose file for the OHIF container (nginx serving viewer and admin panel) and oauth2-proxy.
+#
+# Eigenes Compose-Projekt neben dcm4chee, im selben Docker-Netz (external, unten), damit nginx den Container arc per
+# Name erreicht. Alle Werte mit ANPASSEN sind standortabhaengig. Das Verzeichnis dieser Datei enthaelt:
+#   docker-compose.yml   diese Datei
+#   nginx.conf           aus deploy/nginx.conf.example, Platzhalter ersetzt
+#   ohif-auth.env        Geheimnisse fuer oauth2-proxy, chmod 600, Inhalt:
+#                          OAUTH2_PROXY_CLIENT_ID=<Anwendungs-ID der App-Registrierung>
+#                          OAUTH2_PROXY_CLIENT_SECRET=<Clientschluessel>
+#                          OAUTH2_PROXY_COOKIE_SECRET=<Ausgabe von:
+#                            python3 -c 'import os,base64; print(base64.urlsafe_b64encode(os.urandom(32)).decode())'>
+#   tls/server.crt       Zertifikat fuer pacs.example.org samt Zwischenzertifikaten
+#   tls/server.key       Schluessel, lesbar fuer uid 101 (nginx im OHIF-Image)
+#
+# App-Registrierung (Entra ID): Umleitungs-URI https://pacs.example.org/oauth2/callback (Web), Token-Konfiguration
+# mit Claim groups (Sicherheitsgruppen, als Gruppen-ID). Zwei Gruppen: Viewer (nur ansehen) und Admin (dazu /admin/).
+# Die Admin-Gruppen-ID steht zusaetzlich in nginx.conf (location /oauth2/auth-admin).
+
+services:
+
+  # nginx aus dem OHIF-Image: Viewer, /admin/, Proxy zu dcm4chee. Host 80 -> 8080 (nur Umleitung), 443 -> 8443.
+  ohif:
+    image: ohif/app:latest-beta   # ANPASSEN: feste Version eintragen; nginx muss 1.25.1 oder neuer sein (http2 on)
+    container_name: ohif
+    restart: unless-stopped
+    # nginx direkt starten: das Startskript des Images schreibt default.conf und packt app-config.js um
+    entrypoint: ["/docker-entrypoint.sh"]
+    command: ["nginx", "-g", "daemon off;"]
+    # nur IPv4 (0.0.0.0): ueber IPv6 nimmt docker-proxy die Verbindung an, dann sieht nginx nur das Docker-Gateway als
+    # Client-IP (Protokoll, Pruefung gegen Aussperren) und die Firewall (nur IPv4) filtert nicht
+    ports:
+      - "0.0.0.0:80:8080"
+      - "0.0.0.0:443:8443"
+    volumes:
+      - ./nginx.conf:/etc/nginx/conf.d/default.conf:ro
+      - ./tls:/etc/nginx/tls:ro
+      # ANPASSEN: Pfad zum Repo auf dem Host. Im Container /srv/pacs-admin/admin/ (alias in nginx.conf)
+      - /opt/pacs-admin/web/admin:/srv/pacs-admin/admin:ro
+      # status.json von dashboard-status.py ($PACS_ADMIN_VAR/status), in nginx /admin/daten/
+      - /var/lib/pacs-admin/status:/srv/pacs-admin/status:ro
+      # Sockets des Hilfsdienstes (Verzeichnis von PACS_SOCKET und PACS_LOG_SOCKET, beide im selben Verzeichnis,
+      # Dateinamen verwaltung.sock und protokoll.sock). Lesend reicht fuer Sockets. Das Verzeichnis muss bestehen
+      # bleiben, wenn der Dienst neu startet: wird es neu angelegt, sieht der Container es erst nach einem Neustart.
+      - /run/pacs-admin:/run/pacs-admin:ro
+      - /etc/localtime:/etc/localtime:ro   # Ortszeit im Protokoll
+      # optional: eigene OHIF-Konfiguration (Datenquelle /dcm4chee-arc/aets/DCM4CHEE/rs, gleicher Host)
+      # - ./app-config.js:/usr/share/nginx/html/app-config.js:ro
+      # optional: Titel, AE-Titel, Links, Logo und locale der Verwaltung, ohne das Repo zu aendern
+      # - ./config.js:/srv/pacs-admin/admin/config.js:ro
+      # optional: Logo von derselben Adresse (in config.js logo: '/pacs-logo.svg'); /admin/ verlangt
+      # Cross-Origin-Embedder-Policy require-corp, ein Logo von einem anderen Server laedt nicht
+      # - ./logo.svg:/usr/share/nginx/html/pacs-logo.svg:ro
+
+  # Anmeldung: nginx fragt hier je Anfrage (auth_request). Kein Port nach aussen.
+  ohif-auth:
+    image: quay.io/oauth2-proxy/oauth2-proxy:v7.15.4
+    container_name: ohif-auth
+    restart: unless-stopped
+    env_file: ohif-auth.env   # Client-ID, Client-Secret, Cookie-Secret (siehe oben), nie hier eintragen
+    volumes:
+      - /etc/localtime:/etc/localtime:ro
+    command:
+      - --provider=entra-id                     # anderer Anbieter: --provider=oidc
+      - --oidc-issuer-url=https://login.microsoftonline.com/TENANT-ID/v2.0   # ANPASSEN: Verzeichnis-ID (Mandant)
+      - --redirect-url=https://pacs.example.org/oauth2/callback            # ANPASSEN
+      - --scope=openid email profile
+      - --code-challenge-method=S256
+      - --oidc-email-claim=preferred_username   # Konten ohne Postfach haben kein email
+      - --email-domain=*
+      - --allowed-group=VIEWER-GRUPPEN-ID       # ANPASSEN: darf den Viewer oeffnen
+      - --allowed-group=ADMIN-GRUPPEN-ID        # ANPASSEN: dazu /admin/, gleiche ID wie in nginx.conf
+      - --http-address=0.0.0.0:4180
+      - --reverse-proxy=true
+      # ANPASSEN: Subnetz des Docker-Netzes, also nur nginx im Container ohif. Anzeigen mit
+      # docker network inspect dcm4chee_default -f '{{(index .IPAM.Config 0).Subnet}}'
+      - --trusted-proxy-ip=172.16.0.0/12
+      - --set-xauthrequest=true                 # Kontoname fuer nginx (Protokoll, X-Auth-User)
+      - --skip-provider-button=true
+      - --session-cookie-minimal=true           # Cookie ohne Tokens, kein Auffrischen: Sitzung endet nach cookie-expire
+      - --cookie-secure=true
+      - --cookie-samesite=lax
+      - --cookie-expire=12h
+      - --whitelist-domain=login.microsoftonline.com   # Ziel beim Abmelden (Sitzung beim Anbieter beenden)
+      - --request-logging=false                 # jede Anfrage steht schon im Protokoll von nginx
+      - --upstream=static://202
+
+networks:
+  default:
+    name: dcm4chee_default   # ANPASSEN: Netz des dcm4chee-Projekts (docker network ls), dort heisst der Container arc
+    external: true

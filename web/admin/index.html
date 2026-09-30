@@ -1,0 +1,1212 @@
+<!doctype html>
+<!-- PACS-Verwaltung fuer dcm4chee-arc-light: eine statische Seite hinter nginx und oauth2-proxy.
+     Admin page for dcm4chee-arc-light. Site settings: config.js (window.PACS_ADMIN), no build step. -->
+<html lang="de">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>PACS-Verwaltung</title>
+<link rel="stylesheet" href="/admin/admin.css">
+<style>
+  /* Uebersicht: Kennzahlen oben, Speicher und neue Festplatte nebeneinander */
+  .kennzahlen { display: grid; grid-template-columns: repeat(auto-fit, minmax(230px, 1fr)); gap: 16px; }
+  .kennzahl .card-titel { font-size: 13px; font-weight: 500; }
+  .kennzahl .card-inhalt { padding-top: 8px; }
+  .zahl { font-size: 26px; font-weight: 700; letter-spacing: -.02em; line-height: 1.25; }
+  .zahl small { margin-left: 4px; color: hsl(var(--muted-foreground)); font-size: 13px; font-weight: 500; letter-spacing: 0; }
+  .kennzahl p { margin-top: 6px; color: hsl(var(--muted-foreground)); font-size: 13px; }
+  .speicher { display: grid; grid-template-columns: minmax(0, 2fr) minmax(320px, 1fr); gap: 16px; align-items: start; }
+  @media (max-width: 1150px) { .speicher { grid-template-columns: 1fr; } }
+  .platten { display: grid; grid-template-columns: minmax(64px, max-content) minmax(120px, 1fr) 150px minmax(0, auto); gap: 12px 16px; align-items: center; }
+  .platten .name { font-weight: 500; }
+  .platten .frei { color: hsl(var(--muted-foreground)); font-size: 13px; font-variant-numeric: tabular-nums; }
+  .platten .marken { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; }
+  #platz.fehler { color: hsl(var(--warnung)); }
+  /* Fortschritt beim Einrichten: Schritte senkrecht */
+  .schritte { display: grid; gap: 10px; padding: 0; list-style: none; }
+  .schritte li { display: flex; gap: 10px; align-items: center; color: hsl(var(--muted-foreground)); }
+  .schritte li::before { content: ''; display: grid; place-items: center; width: 20px; height: 20px; border: 2px solid hsl(var(--input));
+    border-radius: 50%; font-size: 12px; font-weight: 700; flex: none; }
+  .schritte li.erledigt { color: hsl(var(--foreground)); }
+  .schritte li.erledigt::before { content: '✓'; border-color: transparent; background: hsl(var(--erfolg)); color: hsl(var(--background)); }
+  .schritte li.jetzt { color: hsl(var(--foreground)); font-weight: 600; }
+  .schritte li.jetzt::before { border-color: hsl(var(--primary)); box-shadow: 0 0 0 3px hsl(var(--primary) / .25); }
+  pre.ausgabe { max-height: 260px; overflow: auto; margin: 8px 0 0; padding: 10px 12px; border: 1px solid hsl(var(--border));
+    border-radius: var(--radius); background: hsl(var(--background)); font-size: 12px; white-space: pre-wrap; }
+  summary { cursor: pointer; color: hsl(var(--muted-foreground)); }
+  /* Tabellen: Knoepfe je Zeile, Aktionsfeld unter einer Zeile */
+  td .knoepfe { display: flex; gap: 6px; }
+  tr.aktion > td { padding: 16px; background: hsl(var(--accent) / .25); white-space: normal; }
+  tr.aktion:hover { background: none; }
+  .aktion .felder input[type=text] { width: 280px; }
+  .aktion .hinweis { margin-top: 10px; }
+  .treffer p { margin-top: 10px; }
+  #zusammen { position: sticky; bottom: 16px; }
+  #zusammen .card-inhalt { display: flex; gap: 12px; flex-wrap: wrap; align-items: center; }
+  /* Firewall: erlaubte Rechner als Chips, geaenderte Zeilen links markiert, Speichern-Leiste unten */
+  .chips { display: flex; flex-wrap: wrap; gap: 4px; align-items: center; }
+  .chip { display: inline-flex; align-items: center; gap: 4px; height: 26px; padding: 0 2px 0 8px; border: 1px solid hsl(var(--input));
+    border-radius: calc(var(--radius) - 2px); font-size: 12px; white-space: nowrap; }
+  .chip small { color: hsl(var(--muted-foreground)); font-size: 12px; }
+  .chip button { width: 22px; height: 22px; padding: 0; border: 0; color: hsl(var(--muted-foreground)); font-size: 15px; }
+  .fw-neu { display: flex; gap: 4px; margin-top: 6px; }
+  .fw-neu input:not([type=checkbox]) { width: 150px; height: 30px; font-size: 13px; }
+  td input.fw-name:not([type=checkbox]) { width: 190px; height: 30px; padding-left: 0; border-color: transparent; background: transparent; font-size: 13px; font-weight: 500; }
+  td input.fw-name:not([type=checkbox]):hover, td input.fw-name:not([type=checkbox]):focus-visible { padding-left: 8px; border-color: hsl(var(--input)); }
+  td select { height: 30px; font-size: 13px; }
+  tr.fw-geaendert > td:first-child { box-shadow: inset 3px 0 0 hsl(var(--primary)); }
+  #fw-leiste { position: sticky; bottom: 16px; z-index: 5; }
+  #fw-leiste .card-inhalt { display: flex; gap: 12px; flex-wrap: wrap; align-items: center; }
+  .card-kopf .zeile { justify-content: flex-end; }
+  /* Firewall: Neu erkannt oben, Einzelheiten zum Aufklappen (der Kopf ist der Schalter) */
+  #fw-vorschlaege.neu { border-color: hsl(var(--warnung) / .6); }
+  #fw-vorschlaege .card-fuss { padding-top: 12px; }
+  details.card > summary { display: flex; align-items: baseline; gap: 10px; padding: 16px 20px; color: hsl(var(--foreground)); list-style: none; }
+  details.card > summary::-webkit-details-marker { display: none; }
+  details.card > summary::before { content: '▸'; color: hsl(var(--muted-foreground)); transition: transform .15s; }
+  details.card[open] > summary::before { transform: rotate(90deg); }
+  details.card > summary .card-text { margin: 0; }
+  details.card > .card-kopf { padding-top: 0; }
+  details.card > .card-inhalt { padding-top: 0; }
+  details.card ul { display: grid; gap: 6px; padding-left: 20px; max-width: 110ch; }
+  td details > summary { font-size: 13px; }
+  td details[open] > summary { margin-bottom: 6px; }
+  .zahl.warnung, .card-text .warnung { color: hsl(var(--warnung)); }
+  /* Protokoll: Tabelle wie ein Aktivitaetsprotokoll: feste Spalten, Tage als Zwischenzeile, Details untereinander */
+  #protokoll table { table-layout: fixed; }
+  #protokoll col.zeit { width: 96px; }
+  #protokoll col.wer { width: 14%; }
+  #protokoll col.patient { width: 16%; }
+  #protokoll col.studie { width: 15%; }
+  #protokoll td { vertical-align: top; white-space: normal; overflow-wrap: anywhere; }
+  #protokoll td.zeit { color: hsl(var(--muted-foreground)); font-variant-numeric: tabular-nums; white-space: nowrap; }
+  #p-form { display: grid; gap: 14px; }
+  #p-form .schnell { display: inline-flex; gap: 2px; padding: 4px; border-radius: var(--radius); background: hsl(var(--background) / .35); }
+  #p-form .schnell button { height: 28px; border-color: transparent; }
+  #p-form .erweitert { padding-top: 14px; border-top: 1px solid hsl(var(--border)); }
+  #protokoll .neben { color: hsl(var(--muted-foreground)); font-size: 12px; }
+  #protokoll tr.tag > td { padding: 16px 12px 8px; background: hsl(var(--background) / .35); font-weight: 600; }
+  #protokoll tr.tag:hover { background: none; }
+  #protokoll .details { display: grid; gap: 2px; margin-top: 6px; padding: 0; list-style: none; font-size: 13px; }
+</style>
+</head>
+<body>
+<header>
+  <img id="logo" alt="" hidden>
+  <span class="titel" id="titel">PACS-Verwaltung</span>
+  <nav aria-label="Bereiche">
+    <a href="#uebersicht">Übersicht</a>
+    <a href="#studien">Studien</a>
+    <a href="#patienten">Patienten</a>
+    <a href="#firewall">Firewall</a>
+    <a href="#protokoll">Protokoll</a>
+    <a id="l-dcm4chee" href="/dcm4chee-arc/ui2/">dcm4chee</a>
+    <a id="l-viewer" href="/">Viewer</a>
+  </nav>
+  <span class="konto" id="konto"></span>
+</header>
+<main>
+  <p id="meldung" class="meldung" role="status" aria-live="polite"></p>
+
+  <section id="uebersicht">
+    <div class="seitenkopf"><h1>Übersicht</h1><p id="stand">lade …</p></div>
+    <div class="kennzahlen">
+      <div class="card kennzahl" id="karte-dienste">
+        <div class="card-kopf"><h2 class="card-titel">Dienste</h2><svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect width="20" height="8" x="2" y="2" rx="2" ry="2"/><rect width="20" height="8" x="2" y="14" rx="2" ry="2"/><line x1="6" x2="6.01" y1="6" y2="6"/><line x1="6" x2="6.01" y1="18" y2="18"/></svg></div>
+        <div class="card-inhalt zeile" id="k-dienste"></div>
+      </div>
+      <div class="card kennzahl">
+        <div class="card-kopf"><h2 class="card-titel">Firewall</h2><svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 13c0 5-3.5 7.5-7.66 8.95a1 1 0 0 1-.67-.01C7.5 20.5 4 18 4 13V6a1 1 0 0 1 1-1c2 0 4.5-1.2 6.24-2.72a1.17 1.17 0 0 1 1.52 0C14.51 3.81 17 5 19 5a1 1 0 0 1 1 1z"/></svg></div>
+        <div class="card-inhalt" id="k-fw"><p>lade …</p></div>
+      </div>
+    </div>
+    <div class="speicher">
+      <div class="card" id="karte-speicher">
+        <div class="card-kopf"><div><h2 class="card-titel">Speicher</h2><p class="card-text" id="platz"></p></div>
+          <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="22" x2="2" y1="12" y2="12"/><path d="M5.45 5.11 2 12v6a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-6l-3.45-6.89A2 2 0 0 0 16.76 4H7.24a2 2 0 0 0-1.79 1.11z"/><line x1="6" x2="6.01" y1="16" y2="16"/><line x1="10" x2="10.01" y1="16" y2="16"/></svg></div>
+        <div class="card-inhalt platten" id="platten"></div>
+      </div>
+      <div class="card" id="neu-platte"></div>
+    </div>
+    <div class="card">
+      <div class="card-kopf"><div><h2 class="card-titel">Letzte Änderungen</h2><p class="card-text">über diese Seite, mit Konto; alles im <a href="#protokoll">Protokoll</a></p></div></div>
+      <div class="card-inhalt tabelle">
+        <table>
+          <thead><tr><th>Zeit</th><th>Konto</th><th>Aktion</th><th>Ergebnis</th></tr></thead>
+          <tbody id="aenderungen"></tbody>
+        </table>
+      </div>
+    </div>
+  </section>
+
+  <section id="studien" hidden>
+    <div class="seitenkopf"><h1>Studien</h1><p>Suchen, bearbeiten, zu einem anderen Patienten verschieben, ablehnen. Abgelehnte Studien lassen sich
+      zurückholen oder endgültig löschen. Leere Suche zeigt die neuesten 200.</p></div>
+    <form class="card card-inhalt leiste" id="f-studien">
+      <label>Patienten-Nr. <input name="pid" class="mono"></label>
+      <label>Name <input name="name" placeholder="Nachname"></label>
+      <label>Accession <input name="acc" class="mono"></label>
+      <label>Von <input type="date" name="von"></label>
+      <label>Bis <input type="date" name="bis"></label>
+      <label>Ansicht <select name="ansicht"><option value="">aktive Studien</option><option value="abgelehnt">abgelehnte Studien</option></select></label>
+      <button class="haupt">Suchen</button>
+    </form>
+    <div class="card tabelle">
+      <table>
+        <thead><tr><th>Datum</th><th>Patient</th><th>Patienten-Nr.</th><th>Accession</th><th>Mod.</th><th>Beschreibung</th><th>Objekte</th><th></th></tr></thead>
+        <tbody id="t-studien"><tr><td colspan="8" class="leer">Suchen, um Studien zu sehen.</td></tr></tbody>
+      </table>
+    </div>
+  </section>
+
+  <section id="patienten" hidden>
+    <div class="seitenkopf"><h1>Patienten</h1><p>Suchen, Name, Geburtsdatum und Geschlecht korrigieren, zwei Einträge zusammenführen.
+      Leere Suche zeigt die ersten 100.</p></div>
+    <form class="card card-inhalt leiste" id="f-patienten">
+      <label>Patienten-Nr. <input name="pid" class="mono"></label>
+      <label>Name <input name="name" placeholder="Nachname"></label>
+      <button class="haupt">Suchen</button>
+    </form>
+    <div class="card tabelle">
+      <table>
+        <thead><tr><th>Patienten-Nr.</th><th>Aussteller</th><th>Name</th><th>Geburtsdatum</th><th>Geschl.</th><th>Studien</th><th></th></tr></thead>
+        <tbody id="t-patienten"><tr><td colspan="7" class="leer">Suchen, um Patienten zu sehen.</td></tr></tbody>
+      </table>
+    </div>
+    <div id="zusammen" class="card" hidden>
+      <div class="card-inhalt">
+        <span id="z-text"></span>
+        <button class="gefahr" id="z-los" disabled>Zusammenführen</button>
+        <button id="z-weg">Auswahl aufheben</button>
+      </div>
+    </div>
+  </section>
+
+  <section id="firewall" hidden>
+    <div class="seitenkopf"><h1>Firewall</h1><p>Wer von außen welchen Port des PACS-Servers erreicht. Neue Geräte, Absender und (falls eingerichtet)
+      Client-PCs erkennt der Server selbst, sie erscheinen unter „Neu erkannt“. Änderungen gelten nach „Speichern“ und stehen mit Konto im Protokoll.</p></div>
+    <div class="card" id="fw-kopf"><div class="card-inhalt info">lade …</div></div>
+    <div class="card tabelle" id="fw-vorschlaege"></div>
+    <div class="card tabelle" id="fw-regeln"></div>
+    <div class="card" id="fw-leiste" hidden></div>
+    <details class="card tabelle" id="fw-clients"></details>
+    <details class="card tabelle" id="fw-dicom"></details>
+    <details class="card tabelle" id="fw-hl7"></details>
+    <details class="card tabelle" id="fw-versuche"></details>
+    <details class="card" id="fw-hilfe">
+      <summary><span class="card-titel">So funktioniert es</span></summary>
+      <div class="card-inhalt"><ul>
+        <li><strong>gesperrt</strong>: nur eingetragene Rechner und Netze kommen durch, alle anderen werden abgewiesen.</li>
+        <li><strong>Probelauf</strong>: alle kommen durch. Wer nicht eingetragen ist, erscheint unter „Neu erkannt“. So sieht man vor dem
+          Sperren, wen es träfe.</li>
+        <li><strong>offen</strong>: alle kommen durch.</li>
+        <li><strong>Ports ohne eigene Regel</strong> (oben) gilt für alle übrigen Ports, auch für künftig veröffentlichte. „gesperrt“ heißt:
+          zu ist alles, was nicht ausdrücklich erlaubt ist.</li>
+        <li>Die Firewall gilt für die von Docker veröffentlichten Ports, nicht für SSH und nicht für Zugriffe vom Server selbst. Sie
+          filtert nur IPv4: veröffentlicht Docker einen Port auch über IPv6, steht „IPv6 nicht gefiltert“ daneben.</li>
+        <li><strong>Neu erkannt</strong> sammelt: <span id="fw-hilfe-clients">Client-PCs (DNS, Namen nach dem Muster
+          <span class="mono" id="fw-muster"></span>, stündlich, je Netz ein Vorschlag für DICOM), </span>DICOM-Geräte und HL7-Absender (Log von dcm4chee, alle 5 Minuten), im Probelauf nicht eingetragene Verbindungen und an DICOM,
+          HL7 oder den Viewer abgewiesene Verbindungen (Kernel-Log, 7 Tage). Ausgeblendetes bleibt weg, bis man es wieder anzeigt.</li>
+      </ul></div>
+    </details>
+  </section>
+
+  <section id="protokoll" hidden>
+  <div class="seitenkopf"><h1>Protokoll</h1><p>Wer hat wann gesucht, welche Studie oder welchen Bericht geöffnet und was wurde in der Verwaltung
+    geändert. Gespeichert verschlüsselt auf dem Server, nichts wird gelöscht.</p></div>
+  <form id="p-form" class="card card-inhalt">
+    <div class="felder">
+      <label>Von <input type="date" name="von" required></label>
+      <label>Bis <input type="date" name="bis" required></label>
+      <span class="schnell" role="group" aria-label="Zeitraum"><button type="button" data-tage="0">Heute</button>
+        <button type="button" data-tage="7">7 Tage</button><button type="button" data-tage="30">30 Tage</button></span>
+      <button class="haupt">Anzeigen</button>
+      <button type="button" id="p-csv" disabled>Als CSV speichern</button>
+      <span id="p-info" class="info" role="status"></span>
+    </div>
+    <div class="felder erweitert">
+      <label>Patienten-ID <input name="pid" class="mono"></label>
+      <label>Patientenname <input name="name" placeholder="Nachname"></label>
+      <label>Konto <input name="konto" placeholder="Teil der Anmeldung"></label>
+      <label>PC <input name="pc" placeholder="Name oder IP"></label>
+      <label>Art <select name="art">
+        <option value="">alle</option>
+        <option value="studie">Studie geöffnet</option>
+        <option value="bericht">Bericht geöffnet</option>
+        <option value="suche">Suche</option>
+        <option value="admin">Verwaltung</option>
+        <option value="fehler">nur Abgelehntes und Fehler</option>
+      </select></label>
+      <label>Text in Aktion und Details <input name="text" placeholder="z. B. Accession, Beschreibung"></label>
+    </div>
+  </form>
+  <div class="card tabelle">
+    <table>
+      <colgroup><col class="zeit"><col class="wer"><col><col class="patient"><col class="studie"></colgroup>
+      <thead><tr><th>Zeit</th><th>Wer</th><th>Was</th><th>Patient</th><th>Studie</th></tr></thead>
+      <tbody id="p-t"><tr><td colspan="5" class="leer">Zeitraum wählen und „Anzeigen“.</td></tr></tbody>
+    </table>
+  </div>
+  </section>
+</main>
+<script src="/admin/config.js"></script>
+<script>
+// PACS-Verwaltung: Studien, Patienten, Speicher, Firewall und Protokoll fuer dcm4chee-arc-light.
+// Admin page logic; site settings come from config.js (window.PACS_ADMIN), defaults below.
+// Spricht dcm4chee nur ueber die in nginx freigegebenen Aufrufe: Studien ablehnen/zurueckholen/endgueltig loeschen
+// (nur abgelehnte), Studie bearbeiten/verschieben, Patient bearbeiten/zusammenfuehren. Jede Aenderung schickt
+// X-PACS-Admin mit einer lesbaren Beschreibung, nginx schreibt sie mit Konto und PC ins Protokoll (Quelle admin,
+// verschluesselte Datenbank). Uebersicht: /admin/daten/status.json (dashboard-status.py, per cron alle 5 Min).
+// Platten, Protokoll und Firewall ueber den Dienst /admin/dienst/ (verwaltung-dienst.py, firewall.py).
+// Aussehen: admin.css (shadcn-Bauweise, OHIF-Farben).
+const K = Object.assign({ titel: 'PACS-Verwaltung', aet: 'DCM4CHEE', iocmAet: 'IOCM_QUALITY', dcm4cheeUrl: '/dcm4chee-arc/ui2/',
+  viewerUrl: '/', logo: '', locale: 'de-DE' }, window.PACS_ADMIN);
+try { Intl.getCanonicalLocales(K.locale); } catch (e) { K.locale = 'de-DE'; }   // z. B. de_AT: sonst scheitert jede Zahl
+const RS = '/dcm4chee-arc/aets/' + K.aet + '/rs';
+const KORB = '/dcm4chee-arc/aets/' + K.iocmAet + '/rs';   // Ansicht mit den abgelehnten Studien
+const STUDIENFELDER = '00100010,00100020,00100021,00080020,00080030,00080050,00080061,00080090,00081030,00201208';
+const $ = s => document.querySelector(s);
+const meldung = $('#meldung');
+const esc = x => String(x ?? '').replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' })[c]);
+const v = (o, t) => (o[t] && o[t].Value && o[t].Value[0]) ?? '';
+const pn = x => ((x && x.Alphabetic) || '').replace('^', ', ').replace(/\^+/g, ' ').trim();
+const datum = d => (d ? d.slice(6, 8) + '.' + d.slice(4, 6) + '.' + d.slice(0, 4) : '');
+const tb = n => (n < 1e12 ? Math.round(n / 1e9) + ' GB' : (n / 1e12).toLocaleString(K.locale, { maximumFractionDigits: 1 }) + ' TB');
+const zahl = n => Number(n || 0).toLocaleString(K.locale);
+const zeit = t => (t ? new Date(t.replace(' ', 'T')).toLocaleString(K.locale, { dateStyle: 'short', timeStyle: 'short' }) : '');
+// Groessenangabe aus dcm4chee ("10GB", dezimal wie dort gerechnet) in Byte
+const bytes = t => { const m = /^([\d.]+)\s*([KMGT]?)B?$/i.exec(t || ''); return m ? m[1] * { '': 1, K: 1e3, M: 1e6, G: 1e9, T: 1e12 }[m[2].toUpperCase()] : 0; };
+// Plattenname fuer die Anzeige: ein Praefix wird nur gekuerzt, wenn status.json eines mitschickt (Feld prefix)
+let praefix = '';
+const kurzName = n => { n = String(n || '?'); return praefix && n.startsWith(praefix) && n.length > praefix.length ? n.slice(praefix.length) : n; };
+const leer = (n, text) => '<tr><td colspan="' + n + '" class="leer">' + text + '</td></tr>';
+
+// Titel, Logo und Verweise aus config.js; leere Adresse = Verweis ausblenden
+document.title = K.titel;
+$('#titel').textContent = K.titel;
+if (K.logo) { $('#logo').src = K.logo; $('#logo').hidden = false; }
+[['#l-dcm4chee', K.dcm4cheeUrl], ['#l-viewer', K.viewerUrl]].forEach(([s, url]) => { $(s).href = url || '#'; $(s).hidden = !url; });
+
+// Meldung unten rechts; Hinweise verschwinden nach 6 s, Fehler bleiben bis zur naechsten Meldung
+let meldungUhr = null;
+function melden(text, fehler) {
+  clearTimeout(meldungUhr);
+  meldung.textContent = text;
+  meldung.className = 'meldung' + (fehler ? ' fehler' : '');
+  if (text && !fehler && !text.endsWith('…')) meldungUhr = setTimeout(() => (meldung.textContent = ''), 6000);
+}
+
+// Aufruf an dcm4chee bzw. den Dienst unter /admin/dienst/ (typ application/json). Aenderungen tragen die
+// Beschreibung fuers Protokoll im Kopf X-PACS-Admin.
+async function api(methode, pfad, { body, protokoll, typ = 'application/dicom+json' } = {}) {
+  const kopf = {};
+  if (body) kopf['Content-Type'] = typ;
+  if (protokoll) kopf['X-PACS-Admin'] = encodeURIComponent(protokoll);
+  const r = await fetch(pfad, { method: methode, headers: kopf, body: body && JSON.stringify(body), cache: 'no-store' });
+  const text = await r.text();
+  if (!r.ok) {
+    let grund = 'abgelehnt';
+    try { const j = JSON.parse(text); grund = j.errorMessage || j.fehler || grund; } catch (e) { /* Fehlerseite von nginx */ }
+    throw new Error(grund + ' (HTTP ' + r.status + ')');
+  }
+  const t = text.trim();
+  return t.startsWith('[') || t.startsWith('{') ? JSON.parse(t) : null;   // 204 = nichts gefunden bzw. erledigt
+}
+
+// DICOM-JSON-Wert, leer = Attribut ohne Wert
+const wert = (vr, x) => (x ? { vr, Value: [x] } : { vr });
+
+async function ausfuehren(text, fn) {
+  melden(text + ' …');
+  try {
+    await fn();
+    melden(text + ': erledigt');
+    return true;
+  } catch (e) {
+    melden(text + ': ' + e.message, true);
+    return false;
+  }
+}
+
+// Reiter ueber die Adresse (#studien usw.)
+function zeigen() {
+  const id = (location.hash || '#uebersicht').slice(1);
+  document.querySelectorAll('main > section').forEach(s => (s.hidden = s.id !== id));
+  document.querySelectorAll('header nav a').forEach(a => a.toggleAttribute('aria-current', a.getAttribute('href') === '#' + id));
+  scrollTo(0, 0);   // der Browser springt sonst zum Abschnitt mit der id und der Titel liegt unter der Kopfleiste
+  melden('');
+  if (id === 'uebersicht') uebersicht();
+  clearInterval(fwUhr);
+  if (id === 'firewall') {
+    fwLaden(false);
+    fwUhr = setInterval(() => {   // jede Minute neue Zahlen, aber nicht mitten in einer Eingabe
+      const tippt = document.activeElement && document.activeElement.closest('#firewall form, #firewall .fw-name');
+      if (!tippt && ![...document.querySelectorAll('.fw-neu input')].some(i => i.value)) fwLaden(false);
+    }, 60000);
+  }
+}
+window.onhashchange = zeigen;
+
+fetch('/oauth2/userinfo').then(r => r.json()).then(u => ($('#konto').textContent = u.preferredUsername || u.email || '')).catch(() => {});
+
+// ---------------------------------------------------------------- Uebersicht
+// status.json darf Teile auslassen (z. B. ohne Plattenassistent): was fehlt, bleibt ausgeblendet. Ohne Platten
+// (fehlt oder leer) zeigt die Karte Speicher nur "keine Daten", nie "keine Platte nimmt neue Bilder an".
+async function uebersicht() {
+  const s = await fetch('/admin/daten/status.json', { cache: 'no-store' }).then(r => (r.ok ? r.json() : null)).catch(() => null);
+  const hat = k => { const x = s && s[k]; return !!x && (typeof x !== 'object' || Object.keys(x).length > 0); };   // [] und {} = keine Daten
+  $('#karte-speicher').hidden = $('.speicher').hidden = !s;
+  $('#neu-platte').hidden = !hat('neue_platten');
+  $('#karte-dienste').hidden = !hat('dienste');
+  $('#stand').textContent = !s ? 'Kein Status vorhanden (dashboard-status.py läuft per cron alle 5 Minuten).'
+    : s.stand ? 'Stand ' + new Date(s.stand).toLocaleString(K.locale) + ', neu alle 5 Minuten' : '';
+  if (hat('platten')) {
+    praefix = typeof s.prefix === 'string' ? s.prefix : '';
+    const freiMin = (typeof s.frei_gb === 'number' ? s.frei_gb : 50) * 1e9;   // STORAGE_FREE_GB auf dem Server
+    const ziele = s.platten.filter(p => p.neue_bilder).sort((a, b) => a.reihe - b.reihe);   // Reihenfolge der Schreibliste
+    const liste = s.schreibliste_bekannt !== false;   // false: LDAP nicht lesbar, Schreibliste unbekannt (nicht leer)
+    $('#platten').innerHTML = s.platten.map(p => {
+      const name = '<span class="name">' + esc(kurzName(p.name)) + '</span>';
+      if (p.fehlt) return name + '<span class="badge gefahr" style="grid-column: span 3">nicht eingehängt, bitte prüfen</span>';
+      const belegt = p.groesse ? 1 - (p.frei || 0) / p.groesse : 0;
+      const marken = [p.neue_bilder === 'jetzt' && '<span class="badge gut punkt">neue Bilder jetzt</span>',
+        p.neue_bilder === 'danach' && '<span class="badge rahmen">neue Bilder als ' + esc(p.reihe) + '.</span>',
+        p.voll && '<span class="badge warn">als voll markiert</span>',
+        p.voll && p.frei >= freiMin && '<button class="klein" data-a="freigeben" data-p="' + esc(p.name) + '" data-liste="' + (p.in_liste ? 1 : '') +
+          '">Markierung entfernen</button>',
+        liste && !p.in_liste && p.frei >= freiMin && '<button class="klein" data-a="anhaengen" data-p="' + esc(p.name) + '">In Schreibliste aufnehmen</button>',
+        // aus der Liste nur, wenn danach noch eine Platte neue Bilder nimmt (pacs-storage.sh prueft das noch einmal)
+        p.in_liste && (!p.neue_bilder || ziele.length > 1) && '<button class="klein leise" data-a="abhaengen" data-p="' + esc(p.name) +
+          '" data-jetzt="' + (p.neue_bilder === 'jetzt' ? esc((ziele[1] || {}).name || '') : '') + '">Aus Schreibliste nehmen</button>'].filter(Boolean);
+      return name + '<div class="balken' + (belegt > .97 ? ' voll' : '') + '" role="progressbar" aria-label="' + esc(p.name) + ' belegt" aria-valuenow="' +
+        Math.round(belegt * 100) + '" aria-valuemin="0" aria-valuemax="100"><i style="width:' + (belegt * 100).toFixed(1) + '%"></i></div>' +
+        '<span class="frei">' + tb(p.frei || 0) + ' frei von ' + tb(p.groesse || 0) + '</span><span class="marken">' + marken.join('') + '</span>';
+    }).join('');
+    // Platz fuer neue Bilder: frei bis zur Schwelle auf den Platten der Schreibliste, die nicht als voll markiert sind
+    const schwelle = bytes((s.neue_platten || {}).schwelle);
+    const platz = ziele.reduce((a, p) => a + Math.max((p.frei || 0) - schwelle, 0), 0);
+    const warn = (typeof s.warn_gb === 'number' ? s.warn_gb : 300) * 1e9;   // STORAGE_WARN_GB auf dem Server
+    $('#platz').className = 'card-text' + (liste && platz < warn ? ' fehler' : '');
+    $('#platz').textContent = !liste ? 'Schreibliste nicht lesbar (LDAP-Container und pacs-storage.sh kandidaten prüfen). ' +
+        'Welche Platte neue Bilder bekommt, ist gerade unbekannt.'
+      : ziele.length
+      ? 'Neue Bilder gehen auf ' + ziele.map(p => kurzName(p.name)).join(', danach ') + '. Platz bis zur Schwelle: ' + tb(platz) +
+        (platz < warn ? '. Bald dem Server eine neue Platte geben.' : '.')
+      : 'Keine Platte nimmt neue Bilder an. Sofort dem Server eine neue Platte geben.';
+  } else if (s) {
+    $('#platten').innerHTML = '';
+    $('#platz').className = 'card-text';
+    $('#platz').textContent = 'Keine Daten zu den Platten (status.json nennt keine; STORAGE_BASE und STORAGE_PREFIX prüfen).';
+  }
+  if (hat('neue_platten')) plattePanel(s);
+  if (hat('dienste')) $('#k-dienste').innerHTML = Object.entries(s.dienste).map(([n, an]) => '<span class="badge punkt ' + (an ? 'gut' : 'gefahr') + '">' +
+    esc(n) + (an ? '' : ' aus') + '</span>').join('');
+  // Firewall: frisch vom Dienst, damit Erlaubtes sofort aus der Zahl verschwindet
+  api('GET', '/admin/dienst/firewall').then(f => {
+    const n = f.vorschlaege.length, dicom = f.konfig.regeln.find(r => r.port === f.dienstports.dicom), c = f.clients || {};
+    // auch an [::] veroeffentlicht und nicht offen: ueber IPv6 kommt jeder durch
+    const v6 = f.wirksam ? f.veroeffentlicht.filter(p => p.ipv6 && (f.konfig.regeln.find(r => r.port === p.port) ||
+      { modus: f.konfig.standard || 'offen' }).modus !== 'offen').length : 0;
+    $('#k-fw').innerHTML = '<div class="zahl' + (n ? ' warnung' : '') + '">' + zahl(n) + '<small>neu erkannt</small></div><p>' +
+      (f.wirksam ? 'Wirksam' : '<span class="fehler">Ausgeschaltet</span>') + ', Standard ' + MODUS[f.konfig.standard || 'offen'] +
+      (dicom ? ', DICOM ' + MODUS[dicom.modus] : '') + (c.muster ? ', ' + zahl((c.pcs || []).length) + ' Client-PCs bekannt' : '') +
+      (v6 ? ', <span class="fehler">' + v6 + (v6 === 1 ? ' Port' : ' Ports') + ' über IPv6 nicht gefiltert</span>' : '') +
+      '. <a href="#firewall">' +
+      (n ? 'Ansehen' : 'Öffnen') + '</a></p>';
+  }).catch(e => ($('#k-fw').innerHTML = '<p class="fehler">' + esc(e.message) + '</p>'));
+  // eigene Aenderungen aus dem Protokoll, neueste oben
+  const log = await fetch('/admin/dienst/protokoll?quelle=admin&letzte=15', { cache: 'no-store' }).then(r => (r.ok ? r.text() : '')).catch(() => '');
+  const zeilen = log.split('\n').filter(Boolean).map(l => { try { return JSON.parse(l); } catch (e) { return null; } }).filter(Boolean).reverse().slice(0, 15);
+  $('#aenderungen').innerHTML = zeilen.map(e => '<tr><td>' + esc(new Date(e.t).toLocaleString(K.locale)) + '</td><td>' + esc(e.u) +
+    '</td><td class="d">' + esc(decodeURIComponent(e.k || '') || e.m + ' ' + e.uri) + '</td><td>' + (e.status < 300 ? '<span class="badge gut">erledigt</span>'
+    : '<span class="badge gefahr">HTTP ' + esc(e.status) + '</span>') + '</td></tr>').join('') || leer(4, 'Noch keine Änderungen über diese Seite.');
+}
+
+// ---------------------------------------------------------------- Studien
+let studien = [];
+const fs = $('#f-studien');
+fs.onsubmit = async ev => {
+  ev.preventDefault();
+  const q = new URLSearchParams();
+  if (fs.pid.value.trim()) q.set('PatientID', fs.pid.value.trim());
+  if (fs.name.value.trim()) q.set('PatientName', fs.name.value.trim().replace(/\*?$/, '*'));
+  if (fs.acc.value.trim()) q.set('AccessionNumber', fs.acc.value.trim());
+  if (fs.von.value || fs.bis.value) q.set('StudyDate', fs.von.value.replace(/-/g, '') + '-' + fs.bis.value.replace(/-/g, ''));
+  q.set('includefield', STUDIENFELDER); q.set('limit', '200'); q.set('orderby', '-StudyDate,-StudyTime');   // leer = alle, neueste zuerst
+  melden('suche …');
+  try {
+    studien = (await api('GET', (fs.ansicht.value ? KORB : RS) + '/studies?' + q)) || [];
+    studienZeigen();
+    melden(studien.length + ' Studien' + (studien.length === 200 ? ', nur die neuesten 200, Suche enger fassen' : '') +
+      (fs.ansicht.value ? ' (abgelehnt)' : ''));
+  } catch (e) { melden('Suche: ' + e.message, true); }
+};
+
+// StudyInstanceUID kommt aus den DICOM-Daten und steht in den Adressen der Aenderungen: nur Ziffern und Punkte, sonst
+// leer (dann keine Knoepfe; ein "&" darin haengte sonst eine zweite Studie an)
+function studieInfo(s) {
+  const uid = v(s, '0020000D');
+  return { uid: /^[0-9.]{1,64}$/.test(uid) ? uid : '', name: pn(v(s, '00100010')), pid: v(s, '00100020'), aussteller: v(s, '00100021'),
+    acc: v(s, '00080050'), datum: v(s, '00080020'), beschr: v(s, '00081030'), zuweiser: (v(s, '00080090') || {}).Alphabetic || '' };
+}
+
+function studienZeigen() {
+  const abgelehnt = !!fs.ansicht.value;
+  $('#t-studien').innerHTML = studien.map((s, i) => {
+    const x = studieInfo(s);
+    const knoepfe = !x.uid ? '<span class="hinweis">StudyInstanceUID ungültig</span>' : abgelehnt
+      ? '<button class="klein" data-a="zurueck" data-i="' + i + '">Zurückholen</button><button class="klein gefahr" data-a="loeschen" data-i="' + i + '">Endgültig löschen</button>'
+      : '<button class="klein" data-a="bearbeiten" data-i="' + i + '">Bearbeiten</button><button class="klein" data-a="verschieben" data-i="' + i +
+        '">Verschieben</button><button class="klein leise" data-a="ablehnen" data-i="' + i + '">Ablehnen</button>';
+    return '<tr><td>' + datum(x.datum) + '</td><td>' + esc(x.name) + '</td><td class="mono">' + esc(x.pid) + '</td><td class="mono">' + esc(x.acc) +
+      '</td><td>' + esc(((s['00080061'] || {}).Value || []).join('/')) + '</td><td class="d">' + esc(x.beschr) +
+      (x.zuweiser ? '<div class="hinweis">Zuweiser: ' + esc(pn({ Alphabetic: x.zuweiser })) + '</div>' : '') + '</td><td>' + esc(v(s, '00201208')) +
+      '</td><td><span class="knoepfe">' + knoepfe + '</span></td></tr>';
+  }).join('') || leer(8, 'Keine Studien gefunden. Suchbegriff ändern oder Datum weiter fassen.');
+}
+
+// Aktionsfeld unter der Zeile oeffnen (immer nur eines)
+function feld(knopf, html) {
+  document.querySelectorAll('tr.aktion').forEach(t => t.remove());
+  const tr = document.createElement('tr');
+  tr.className = 'aktion';
+  tr.innerHTML = '<td colspan="8">' + html + '</td>';
+  knopf.closest('tr').after(tr);
+  const erstes = tr.querySelector('input, select, button');
+  if (erstes) erstes.focus();
+  return tr;
+}
+
+$('#t-studien').onclick = async ev => {
+  const b = ev.target.closest('button[data-a]');
+  if (!b) return;
+  const x = studieInfo(studien[b.dataset.i]);
+  const wer = [x.pid, x.name, x.acc, x.beschr].filter(Boolean).join(' · ');
+  const fertig = () => fs.requestSubmit();
+
+  if (b.dataset.a === 'ablehnen') {
+    if (!confirm('Studie ablehnen?\n\n' + wer + '\n\nSie verschwindet aus dem Viewer und der Suche, lässt sich aber zurückholen.')) return;
+    if (await ausfuehren('Ablehnen', () => api('POST', RS + '/studies/' + x.uid + '/reject/113001%5EDCM', { protokoll: 'Studie abgelehnt · ' + wer }))) fertig();
+  }
+
+  if (b.dataset.a === 'zurueck') {
+    if (await ausfuehren('Zurückholen', () => api('POST', KORB + '/studies/' + x.uid + '/reject/REVOKE_REJECTION%5E99DCM4CHEE', { protokoll: 'Ablehnung zurückgenommen · ' + wer }))) fertig();
+  }
+
+  if (b.dataset.a === 'loeschen') {
+    const wort = x.acc || x.pid;
+    const tr = feld(b, '<div class="alert gefahr"><strong>Endgültig löschen</strong><p>' + esc(wer) + '</p>' +
+      '<p class="hinweis">Bilder und Einträge dieser Studie werden im PACS gelöscht. Das lässt sich nicht rückgängig machen.</p>' +
+      '<div class="felder"><label>Zur Bestätigung ' + (x.acc ? 'die Accession-Nr.' : 'die Patienten-Nr.') + ' eintippen <input type="text" class="mono" autocomplete="off"></label>' +
+      '<button class="gefahr" disabled>Endgültig löschen</button><button type="button">Abbrechen</button></div></div>');
+    const [eingabe] = tr.querySelectorAll('input');
+    const [los, weg] = tr.querySelectorAll('button');
+    eingabe.oninput = () => (los.disabled = eingabe.value.trim() !== wort);
+    weg.onclick = () => tr.remove();
+    los.onclick = async () => {
+      if (await ausfuehren('Endgültig löschen', () => api('DELETE', KORB + '/studies/' + x.uid, { protokoll: 'Studie endgültig gelöscht · ' + wer }))) fertig();
+    };
+  }
+
+  if (b.dataset.a === 'bearbeiten') {
+    const tr = feld(b, '<form class="felder"><label>Beschreibung <input type="text" name="beschr" value="' + esc(x.beschr) + '"></label>' +
+      '<label>Accession <input name="acc" class="mono" value="' + esc(x.acc) + '"></label>' +
+      '<label>Datum <input type="date" name="datum" value="' + (x.datum ? x.datum.slice(0, 4) + '-' + x.datum.slice(4, 6) + '-' + x.datum.slice(6, 8) : '') + '"></label>' +
+      '<label>Zuweiser (Nachname, Vorname) <input type="text" name="zuweiser" value="' + esc(pn({ Alphabetic: x.zuweiser })) + '"></label>' +
+      '<button class="haupt">Speichern</button><button type="button">Abbrechen</button></form>' +
+      '<p class="hinweis">Der alte Wert bleibt in der Studie nachvollziehbar (Original Attributes Sequence).</p>');
+    const f = tr.querySelector('form');
+    f.querySelector('button[type=button]').onclick = () => tr.remove();
+    f.onsubmit = async e => {
+      e.preventDefault();
+      const neu = {}, was = [];
+      if (f.beschr.value.trim() !== x.beschr) { neu['00081030'] = wert('LO', f.beschr.value.trim()); was.push('Beschreibung ' + (x.beschr || '(leer)') + ' → ' + (f.beschr.value.trim() || '(leer)')); }
+      if (f.acc.value.trim() !== x.acc) { neu['00080050'] = wert('SH', f.acc.value.trim()); was.push('Accession ' + (x.acc || '(leer)') + ' → ' + (f.acc.value.trim() || '(leer)')); }
+      const d = f.datum.value.replace(/-/g, '');
+      if (d !== x.datum) { neu['00080020'] = wert('DA', d); was.push('Datum ' + (datum(x.datum) || '(leer)') + ' → ' + (datum(d) || '(leer)')); }
+      // Zuweiser als DICOM-Name: "Nachname, Vorname" -> Nachname^Vorname; nur speichern, wenn inhaltlich anders
+      const zw = f.zuweiser.value.split(',').map(t => t.trim()).filter(Boolean).slice(0, 2).join('^');
+      if (pn({ Alphabetic: zw }) !== pn({ Alphabetic: x.zuweiser })) {
+        neu['00080090'] = zw ? { vr: 'PN', Value: [{ Alphabetic: zw }] } : { vr: 'PN' };
+        was.push('Zuweiser ' + (pn({ Alphabetic: x.zuweiser }) || '(leer)') + ' → ' + (pn({ Alphabetic: zw }) || '(leer)'));
+      }
+      if (!was.length) return melden('Nichts geändert.');
+      if (await ausfuehren('Studie speichern', () => api('POST', RS + '/studies/update?reasonForModification=CORRECT&StudyInstanceUID=' + x.uid,
+        { body: neu, protokoll: 'Studie bearbeitet · ' + [x.pid, x.name].filter(Boolean).join(' · ') + ' · ' + was.join(', ') }))) fertig();
+    };
+  }
+
+  if (b.dataset.a === 'verschieben') {
+    const tr = feld(b, '<form class="felder"><label>Zu Patient mit Patienten-Nr. <input name="ziel" class="mono"></label>' +
+      '<button class="haupt">Patient suchen</button><button type="button">Abbrechen</button></form><div class="treffer"></div>' +
+      '<p class="hinweis">Die Studie wechselt den Patienten. Name und Geburtsdatum des Zielpatienten bleiben, wie sie sind.</p>');
+    const f = tr.querySelector('form');
+    f.querySelector('button[type=button]').onclick = () => tr.remove();
+    f.onsubmit = async e => {
+      e.preventDefault();
+      if (!f.ziel.value.trim()) return;
+      const treffer = tr.querySelector('.treffer');
+      try {
+        const p = (await api('GET', RS + '/patients?PatientID=' + encodeURIComponent(f.ziel.value.trim()) + '&includefield=00100010,00100021,00100030,00201200')) || [];
+        treffer.innerHTML = p.map((q, i) => '<p class="zeile"><button type="button" class="klein haupt" data-j="' + i + '">Hierhin verschieben</button> ' +
+          esc(v(q, '00100020')) + ' · ' + esc(pn(v(q, '00100010'))) + ' · geb. ' + datum(v(q, '00100030')) + ' · ' + esc(v(q, '00201200')) + ' Studien' +
+          (v(q, '00100021') ? ' · Aussteller ' + esc(v(q, '00100021')) : '') + '</p>').join('') || '<p class="info">Kein Patient mit dieser Nummer.</p>';
+        treffer.onclick = async e2 => {
+          const k = e2.target.closest('button[data-j]');
+          if (!k) return;
+          const q = p[k.dataset.j];
+          const ziel = 'PatientID=' + encodeURIComponent(v(q, '00100020')) + (v(q, '00100021') ? '&IssuerOfPatientID=' + encodeURIComponent(v(q, '00100021')) : '');
+          if (await ausfuehren('Verschieben', () => api('POST', RS + '/studies/' + x.uid + '/patient?' + ziel + '&updatePolicy=PRESERVE',
+            { protokoll: 'Studie verschoben · ' + [x.acc, x.beschr].filter(Boolean).join(' · ') + ' · von ' + x.pid + ' ' + x.name + ' zu ' + v(q, '00100020') + ' ' + pn(v(q, '00100010')) }))) fertig();
+        };
+      } catch (e3) { melden('Patientensuche: ' + e3.message, true); }
+    };
+  }
+};
+
+// ---------------------------------------------------------------- Patienten
+let patienten = [], quelle = null, ziel = null;
+const fp = $('#f-patienten');
+const kennung = p => v(p, '00100020') + (v(p, '00100021') ? '^^^' + v(p, '00100021') : '');
+const kurz = p => v(p, '00100020') + ' ' + pn(v(p, '00100010')) + ', geb. ' + datum(v(p, '00100030'));
+
+fp.onsubmit = async ev => {
+  ev.preventDefault();
+  const q = new URLSearchParams();
+  if (fp.pid.value.trim()) q.set('PatientID', fp.pid.value.trim());
+  if (fp.name.value.trim()) q.set('PatientName', fp.name.value.trim().replace(/\*?$/, '*'));
+  q.set('includefield', 'all'); q.set('limit', '100');   // leer = alle
+  melden('suche …');
+  try {
+    patienten = (await api('GET', RS + '/patients?' + q)) || [];
+    patientenZeigen();
+    melden(patienten.length + ' Patienten-Einträge' + (patienten.length === 100 ? ', nur die ersten 100' : ''));
+  } catch (e) { melden('Suche: ' + e.message, true); }
+};
+
+function patientenZeigen() {
+  $('#t-patienten').innerHTML = patienten.map((p, i) => '<tr><td class="mono">' + esc(v(p, '00100020')) + '</td><td class="mono">' + esc(v(p, '00100021')) +
+    '</td><td>' + esc(pn(v(p, '00100010'))) + '</td><td>' + datum(v(p, '00100030')) + '</td><td>' + esc(v(p, '00100040')) + '</td><td>' + esc(v(p, '00201200')) +
+    '</td><td><span class="knoepfe"><button class="klein" data-a="bearbeiten" data-i="' + i + '">Bearbeiten</button>' +
+    '<button class="klein leise" data-a="quelle" data-i="' + i + '">geht auf in …</button><button class="klein leise" data-a="ziel" data-i="' + i + '">… diesen</button></span></td></tr>').join('') ||
+    leer(7, 'Keine Patienten gefunden.');
+  zusammenZeigen();
+}
+
+function zusammenZeigen() {
+  $('#zusammen').hidden = !(quelle || ziel);
+  $('#z-text').textContent = (quelle ? kurz(quelle) : '(Eintrag wählen: „geht auf in …“)') + '  →  ' + (ziel ? kurz(ziel) : '(Ziel wählen: „… diesen“)');
+  $('#z-los').disabled = !(quelle && ziel && kennung(quelle) !== kennung(ziel));
+}
+$('#z-weg').onclick = () => { quelle = ziel = null; zusammenZeigen(); };
+$('#z-los').onclick = async () => {
+  if (!confirm('Zusammenführen?\n\n' + kurz(quelle) + '\ngeht auf in\n' + kurz(ziel) + '\n\nAlle Studien wandern zum Ziel. Rückgängig nur von Hand.')) return;
+  if (await ausfuehren('Zusammenführen', () => api('POST', RS + '/patients/' + encodeURIComponent(kennung(quelle)) + '/merge/' + encodeURIComponent(kennung(ziel)),
+    { protokoll: 'Patienten zusammengeführt · ' + kurz(quelle) + ' geht auf in ' + kurz(ziel) }))) {
+    quelle = ziel = null;
+    fp.requestSubmit();
+  }
+};
+
+$('#t-patienten').onclick = async ev => {
+  const b = ev.target.closest('button[data-a]');
+  if (!b) return;
+  const p = patienten[b.dataset.i];
+  if (b.dataset.a === 'quelle') { quelle = p; return zusammenZeigen(); }
+  if (b.dataset.a === 'ziel') { ziel = p; return zusammenZeigen(); }
+  // Bearbeiten: ganzer Datensatz zurueck (PUT ersetzt), damit Adresse, Telefon usw. aus dem KIS bleiben
+  const name = (v(p, '00100010') || {}).Alphabetic || '';
+  const [nach, vor] = name.split('^');
+  const geb = v(p, '00100030');
+  const tr = document.createElement('tr');
+  document.querySelectorAll('tr.aktion').forEach(t => t.remove());
+  tr.className = 'aktion';
+  tr.innerHTML = '<td colspan="7"><form class="felder"><label>Nachname <input name="nach" value="' + esc(nach) + '"></label>' +
+    '<label>Vorname <input name="vor" value="' + esc(vor) + '"></label>' +
+    '<label>Geburtsdatum <input type="date" name="geb" value="' + (geb ? geb.slice(0, 4) + '-' + geb.slice(4, 6) + '-' + geb.slice(6, 8) : '') + '"></label>' +
+    '<label>Geschlecht <select name="sex">' + ['', 'M', 'F', 'O'].map(s => '<option' + (s === v(p, '00100040') ? ' selected' : '') + '>' + s + '</option>').join('') + '</select></label>' +
+    '<button class="haupt">Speichern</button><button type="button">Abbrechen</button></form>' +
+    '<p class="hinweis">Kommen die Patientendaten per HL7 aus dem KIS, überschreibt die nächste ADT-Nachricht diese Angaben.</p></td>';
+  b.closest('tr').after(tr);
+  const f = tr.querySelector('form');
+  f.nach.focus();
+  f.querySelector('button[type=button]').onclick = () => tr.remove();
+  f.onsubmit = async e => {
+    e.preventDefault();
+    const neu = JSON.parse(JSON.stringify(p));
+    // Angaben der Suche, keine Patientendaten
+    Object.keys(neu).filter(k => k.startsWith('0020') || ['00080054', '00080056', '00081190'].includes(k)).forEach(k => delete neu[k]);
+    const neuName = [f.nach.value.trim(), f.vor.value.trim()].filter(Boolean).join('^');
+    neu['00100010'] = { vr: 'PN', Value: [{ Alphabetic: neuName }] };
+    if (f.geb.value) neu['00100030'] = { vr: 'DA', Value: [f.geb.value.replace(/-/g, '')] }; else delete neu['00100030'];
+    if (f.sex.value) neu['00100040'] = { vr: 'CS', Value: [f.sex.value] }; else delete neu['00100040'];
+    const was = [name !== neuName && 'Name ' + pn({ Alphabetic: name }) + ' → ' + pn({ Alphabetic: neuName }),
+      geb !== f.geb.value.replace(/-/g, '') && 'Geburtsdatum ' + datum(geb) + ' → ' + datum(f.geb.value.replace(/-/g, '')),
+      v(p, '00100040') !== f.sex.value && 'Geschlecht ' + (v(p, '00100040') || '(leer)') + ' → ' + (f.sex.value || '(leer)')].filter(Boolean);
+    if (!was.length) return melden('Nichts geändert.');
+    if (await ausfuehren('Patient speichern', () => api('PUT', RS + '/patients/' + encodeURIComponent(kennung(p)),
+      { body: neu, protokoll: 'Patient bearbeitet · ' + v(p, '00100020') + ' · ' + was.join(', ') }))) fp.requestSubmit();
+  };
+};
+
+// freigeben und anhaengen nur ab frei_gb aus status.json (STORAGE_FREE_GB, Standard 50) angeboten, pacs-storage.sh prueft das noch einmal:
+//   freigeben = Markierung "voll" entfernen, anhaengen = hinten an die Schreibliste (entfernt die Markierung mit),
+//   abhaengen = aus der Schreibliste nehmen (die Bilder darauf bleiben lesbar)
+$('#platten').onclick = async ev => {
+  const b = ev.target.closest('button[data-a]');
+  if (!b) return;
+  const n = kurzName(b.dataset.p);
+  const frage = {
+    freigeben: 'Markierung „voll“ bei ' + n + ' entfernen?\n\n' + (b.dataset.liste
+      ? n + ' steht in der Schreibliste: neue Bilder kommen darauf, sobald die Platten davor voll sind.'
+      : n + ' steht in keiner Schreibliste und bekommt dadurch keine neuen Bilder, nur die Anzeige stimmt dann wieder.') +
+      '\nIst die Platte wieder voll, markiert dcm4chee sie selbst neu.',
+    anhaengen: n + ' hinten an die Schreibliste?\n\nNeue Bilder kommen auf ' + n + ', sobald die Platten davor in der Liste voll sind. ' +
+      'Die Platten sind dann nicht mehr streng nach Alter sortiert.',
+    abhaengen: n + ' aus der Schreibliste nehmen?\n\n' + n + ' bekommt danach keine neuen Bilder mehr. Die Bilder darauf bleiben lesbar.' +
+      (b.dataset.jetzt ? '\nNeue Bilder gehen ab sofort auf ' + kurzName(b.dataset.jetzt) + '.' : '') +
+      '\nZurück geht es mit „In Schreibliste aufnehmen“ (dann hinten in der Liste).',
+  }[b.dataset.a];
+  if (!frage || !confirm(frage)) return;
+  const text = { freigeben: 'Markierung voll entfernt', anhaengen: 'In Schreibliste aufgenommen', abhaengen: 'Aus Schreibliste genommen' }[b.dataset.a];
+  if (await ausfuehren(text + ': ' + n, () => api('POST', '/admin/dienst/' + b.dataset.a,
+    { typ: 'application/json', body: { platte: b.dataset.p }, protokoll: text + ' · ' + b.dataset.p }))) uebersicht();
+};
+
+// ---------------------------------------------------------------- Neue Festplatte
+// Dem Server eine leere Platte geben -> erscheint hier (dashboard-status.py alle 5 Min oder "Jetzt suchen") -> bestaetigen -> der
+// Dienst ruft pacs-storage.sh add auf (prueft vor dem Formatieren selbst noch einmal, dass die Platte leer ist).
+// Fortschritt aus dessen Ausgabe: die Abschnitte, die das Skript nacheinander schreibt.
+const SCHRITTE = [['--- Plan', 'Platte prüfen'], ['--- Platte', 'Formatieren und einhängen'], ['--- Sichtbar', 'Archiv sieht die Platte'],
+  ['--- Archiv', 'Im Archiv eintragen'], ['fertig.', 'Fertig']];
+let auftragUhr = null;
+const kopf = (titel, text) => '<div class="card-kopf"><div><h2 class="card-titel">' + titel + '</h2><p class="card-text">' + text + '</p></div></div>';
+
+async function plattePanel(s) {
+  const el = $('#neu-platte');
+  const a = await fetch('/admin/dienst/auftrag', { cache: 'no-store' }).then(r => (r.ok ? r.json() : {})).catch(() => ({}));
+  clearTimeout(auftragUhr);
+  if (a.start && (a.laeuft || Date.now() - new Date(a.ende) < 30 * 60e3)) return auftragZeigen(el, a);
+  const n = Object.assign({ kandidaten: [] }, s.neue_platten);   // nur Geraete, die pacs-storage.sh kandidaten meldet
+  if (!n.kandidaten.length) {
+    el.innerHTML = kopf('Neue Festplatte', 'Keine leere Platte gefunden.') + '<div class="card-inhalt stapel"><ol class="schritte">' +
+      '<li>Dem Server eine neue, leere Festplatte geben (VM: im Hypervisor hinzufügen), nicht partitionieren, nicht formatieren</li>' +
+      '<li>Sie erscheint hier innerhalb von 5 Minuten</li><li>Einrichten bestätigen, fertig</li></ol>' +
+      '<div><button id="p-suchen">Jetzt suchen</button></div></div>';
+    $('#p-suchen').onclick = async () => {
+      if (await ausfuehren('Nach neuen Platten suchen', () => api('GET', '/admin/dienst/platten'))) uebersicht();
+    };
+    return;
+  }
+  el.innerHTML = kopf('Neue Festplatte erkannt', 'leer, bereit zum Einrichten') + '<div class="card-inhalt stapel">' +
+    n.kandidaten.map((k, i) => '<div class="zeile"><span class="badge haupt">' + esc(k.geraet.replace('/dev/', '')) + '</span><strong>' + tb(k.groesse) +
+      '</strong><span class="info">' + esc(k.modell) + '</span><button class="haupt klein" data-i="' + i + '">Als ' + esc(n.name) + ' einrichten …</button></div>').join('') +
+    '<div id="p-frage"></div></div>';
+  el.onclick = ev => {
+    const b = ev.target.closest('button[data-i]');
+    if (!b) return;
+    const k = n.kandidaten[b.dataset.i];
+    const f = $('#p-frage');
+    f.innerHTML = '<div class="alert gefahr"><strong>' + esc(k.geraet) + ' (' + tb(k.groesse) + ') wird formatiert und als ' + esc(n.name) + ' eingebunden</strong>' +
+      '<ol><li>Dateisystem ext4 mit Namen ' + esc(n.name) + ', ohne Reserve für root</li>' +
+      '<li>eingehängt, Eintrag in /etc/fstab</li>' +
+      '<li>im Archiv als Speicher wie ' + esc(n.vorlage) + ': Schwelle ' + esc(n.schwelle || '?') + ' (so viel bleibt frei, dann gilt die Platte als voll)</li>' +
+      '<li>hinten an die Schreibliste: neue Bilder kommen darauf, sobald die Platten davor voll sind.</li></ol>' +
+      '<p class="hinweis">Formatiert wird nur eine leere Platte: keine Partition, kein Dateisystem, erstes MiB nur Nullen. Das prüft das Skript ' +
+      'vor dem Formatieren noch einmal.</p>' +
+      '<div class="felder"><button class="gefahr" id="p-los">Formatieren und einrichten</button><button id="p-weg">Abbrechen</button></div></div>';
+    $('#p-weg').focus();
+    $('#p-weg').onclick = () => (f.innerHTML = '');
+    $('#p-los').onclick = async () => {
+      if (await ausfuehren('Platte einrichten', () => api('POST', '/admin/dienst/einrichten', { typ: 'application/json',
+        body: { geraet: k.geraet, groesse: k.groesse, name: n.name },
+        protokoll: 'Neue Platte ' + n.name + ' eingerichtet · ' + k.geraet + ' · ' + tb(k.groesse) }))) plattePanel(s);
+    };
+  };
+}
+
+function auftragZeigen(el, a) {
+  const aus = a.ausgabe || '';
+  const stand = SCHRITTE.reduce((n, [marke], i) => (aus.includes(marke) ? i : n), -1);
+  const ok = !a.laeuft && a.rc === 0;
+  el.onclick = null;
+  el.innerHTML = kopf('Neue Festplatte ' + esc(a.name), a.laeuft ? 'läuft seit ' + esc(zeit(a.start)) + ', gestartet von ' + esc(a.wer)
+    : ok ? 'eingerichtet ' + esc(zeit(a.ende)) : 'abgebrochen ' + esc(zeit(a.ende))) +
+    '<div class="card-inhalt stapel"><ol class="schritte">' + SCHRITTE.map(([, text], i) =>
+      '<li class="' + (ok || i < stand ? 'erledigt' : i === stand && a.laeuft ? 'jetzt' : '') + '">' + text + '</li>').join('') + '</ol>' +
+    (a.laeuft ? '' : ok ? '<p class="ok" role="status">' + esc(a.name) + ' ist eingerichtet.</p>'
+      : '<div class="alert gefahr" role="status"><strong>Abgebrochen</strong><p>' + esc((aus.match(/HALT: .*/) || ['siehe Ausgabe'])[0]) +
+        '</p><p class="hinweis">Ausgabe unten, auch in /var/log/pacs-storage.log.</p></div>') +
+    '<details' + (ok ? '' : ' open') + '><summary>Ausgabe des Skripts</summary><pre class="ausgabe">' + esc(aus) + '</pre></details></div>';
+  if (a.laeuft) auftragUhr = setTimeout(async () => {
+    const neu = await fetch('/admin/dienst/auftrag', { cache: 'no-store' }).then(r => r.json()).catch(() => a);
+    if (neu.laeuft) auftragZeigen(el, neu); else uebersicht();
+  }, 2000);
+}
+
+// ---------------------------------------------------------------- Firewall
+// Regeln, Zaehler, Versuche und Absender vom Dienst (firewall.py). Aenderungen erst im Entwurf, "Speichern" schickt alle
+// Regeln: der Dienst prueft, sichert die vorige Fassung, wendet an (ohne Luecke) und lehnt ab, was den eigenen PC
+// aussperren wuerde. Ports ohne Regel folgen dem Standard. "Erlauben" legt eine fehlende Regel an (bei Standard offen im
+// Probelauf). "Neu erkannt" kommt fertig vom Dienst (firewall.py vorschlaege), hier fallen nur noch die im Entwurf
+// erlaubten und ausgeblendeten weg.
+let fw = null, fwEntwurf = null, fwUhr = null;
+const fwOffen = new Set();   // aufgeklappte lange Listen in der Port-Tabelle, bleiben beim Neuzeichnen offen
+const MODUS = { offen: 'offen', probelauf: 'Probelauf', gesperrt: 'gesperrt' };
+const std = () => fwK().standard || 'offen';   // Zugang fuer Ports ohne eigene Regel
+const fwK = () => fwEntwurf || (fw && fw.konfig) || { regeln: [] };
+const regel = port => fwK().regeln.find(r => r.port === port);
+const intern = ip => ((fw && fw.intern) || []).some(n => imNetz(ip, n));   // Docker-Netze, der Server selbst
+const ipZahl = ip => ip.split('.').reduce((n, t) => n * 256 + Number(t), 0);
+const imNetz = (ip, quelle) => {
+  const [netz, bits = 32] = quelle.split('/');
+  const maske = Number(bits) === 0 ? 0 : (0xffffffff << (32 - bits)) >>> 0;
+  return ((ipZahl(ip) & maske) >>> 0) === ((ipZahl(netz) & maske) >>> 0);
+};
+// q (Adresse oder Netz) liegt ganz in einem erlaubten Eintrag des Ports
+const deckt = (e, q) => { const [n, b = 32] = q.split('/'); return Number(e.split('/')[1] || 32) <= Number(b) && imNetz(n, e); };
+const eingetragen = (port, q) => { const r = regel(port); return !!r && r.erlaubt.some(e => deckt(e.quelle, q)); };
+const frei = (port, q) => (regel(port) || { modus: std() }).modus === 'offen' || eingetragen(port, q);
+const vorschlaege = () => { const aus = new Set(fwK().ausgeblendet || []); return fw.vorschlaege.filter(x => !aus.has(x.port + ' ' + x.quelle) && !frei(x.port, x.quelle)); };
+const rechner = ip => (fw && fw.namen[ip]) || '';
+
+async function fwLaden(neu) {
+  try {
+    fw = await api('GET', '/admin/dienst/firewall' + (neu ? '?neu=1' : ''));
+    fwZeigen();
+  } catch (e) { melden('Firewall laden: ' + e.message, true); }
+}
+
+function fwAendern(fn) {
+  if (!fwEntwurf) fwEntwurf = JSON.parse(JSON.stringify(fw.konfig));
+  fn(fwEntwurf);
+  fwEntwurf.regeln.sort((a, b) => a.port - b.port);
+  fwZeigen();
+}
+
+function fwDazu(port, quelle, notiz) {
+  fwAendern(k => {
+    let r = k.regeln.find(x => x.port === port);
+    if (!r) k.regeln.push(r = { port, name: fw.kritisch[port] || '', modus: std() === 'offen' ? 'probelauf' : std(), protokollieren: false, erlaubt: [] });
+    const e = r.erlaubt.find(x => x.quelle === quelle);
+    if (!e) r.erlaubt.push({ quelle, notiz: notiz || '' });
+    else if (notiz && !e.notiz.split(', ').includes(notiz)) e.notiz = (e.notiz ? e.notiz + ', ' : '') + notiz;
+  });
+}
+
+// lesbare Liste der Aenderungen: fuer die Rueckfrage und das Protokoll
+function fwUnterschiede() {
+  const alt = new Map(fw.konfig.regeln.map(r => [r.port, r])), neu = new Map(fwEntwurf.regeln.map(r => [r.port, r]));
+  const z = [];
+  if (!!fw.konfig.aktiv !== !!fwEntwurf.aktiv) z.push('Firewall ' + (fwEntwurf.aktiv ? 'eingeschaltet' : 'AUSGESCHALTET'));
+  if ((fw.konfig.standard || 'offen') !== (fwEntwurf.standard || 'offen'))
+    z.push('Standard für Ports ohne Regel: ' + MODUS[fw.konfig.standard || 'offen'] + ' → ' + MODUS[fwEntwurf.standard || 'offen']);
+  for (const [p, r] of neu) {
+    const a = alt.get(p), vorher = a ? a.erlaubt : [];
+    if (!a || a.modus !== r.modus) z.push(p + ': ' + (a ? MODUS[a.modus] : 'Standard') + ' → ' + MODUS[r.modus]);
+    r.erlaubt.filter(e => !vorher.some(x => x.quelle === e.quelle)).forEach(e => z.push(p + ': + ' + e.quelle + (e.notiz ? ' (' + e.notiz + ')' : '')));
+    vorher.filter(e => !r.erlaubt.some(x => x.quelle === e.quelle)).forEach(e => z.push(p + ': − ' + e.quelle + (e.notiz ? ' (' + e.notiz + ')' : '')));
+    if (a && a.name !== r.name) z.push(p + ': Name „' + r.name + '“');
+    if (a && !!a.protokollieren !== !!r.protokollieren) z.push(p + ': erlaubte Verbindungen ' + (r.protokollieren ? '' : 'nicht mehr ') + 'protokollieren');
+  }
+  for (const [p, a] of alt) if (!neu.has(p)) z.push(p + ': ' + MODUS[a.modus] + ' → Standard (' + MODUS[fwEntwurf.standard || 'offen'] + '), Regel gelöscht');
+  const aa = fw.konfig.ausgeblendet || [], na = fwEntwurf.ausgeblendet || [];
+  na.filter(x => !aa.includes(x)).forEach(x => z.push('ausblenden: ' + x.split(' ')[1] + ' für Port ' + x.split(' ')[0]));
+  const wieder = aa.filter(x => !na.includes(x)).length;
+  if (wieder) z.push(wieder + ' ausgeblendete wieder anzeigen');
+  return z;
+}
+
+async function fwSpeichern() {
+  const z = fwUnterschiede();
+  if (!z.length) { fwEntwurf = null; return fwZeigen(); }
+  if (!confirm('Firewall ändern:\n\n' + z.join('\n') + '\n\nGilt sofort.')) return;
+  if (await ausfuehren('Firewall speichern', async () => {
+    fw = await api('POST', '/admin/dienst/firewall', { typ: 'application/json', body: fwEntwurf,
+      protokoll: ('Firewall geändert · ' + z.join(' · ')).slice(0, 1500) });
+    fwEntwurf = null;
+  })) fwZeigen();
+}
+
+function fwZeigen() {
+  if (!fw) return;
+  const k = fwK(), seit = fw.zaehler_seit ? zeit(fw.zaehler_seit) : '–';
+  const ports = new Map(fw.veroeffentlicht.map(v => [v.port, v]));   // {port, ziel, container, ipv6}, ohne = nicht veroeffentlicht
+  k.regeln.forEach(r => ports.has(r.port) || ports.set(r.port, null));
+  const g = fw.konfig.geaendert;
+  $('#fw-kopf').innerHTML = '<div class="card-inhalt zeile">' +
+    (fw.wirksam ? '<span class="badge gut punkt">wirksam</span>' : '<span class="badge gefahr punkt">ausgeschaltet</span>') +
+    '<span class="info">Schnittstelle ' + esc(k.schnittstelle) + ' · Zahlen seit ' + esc(seit) +
+    (g ? ' · zuletzt geändert ' + esc(zeit(g.zeit)) + ' von ' + esc(g.wer || '?') : '') + '</span><span style="flex:1"></span>' +
+    '<label class="wahl">Ports ohne eigene Regel <select id="fw-standard">' + Object.keys(MODUS).map(m => '<option value="' + m + '"' +
+      (m === std() ? ' selected' : '') + '>' + MODUS[m] + '</option>').join('') + '</select></label>' +
+    '<label class="wahl"><input type="checkbox" id="fw-aktiv"' + (k.aktiv ? ' checked' : '') + '> eingeschaltet</label>' +
+    '<button class="klein" data-a="neu">Neu laden</button></div>';
+
+  const zeilen = [...ports.entries()].sort((a, b) => a[0] - b[0]).map(([port, pv]) => {
+    const r = regel(port), z = fw.zaehler[port] || { verb: {}, fremd: 0, offen: 0, std: 0 }, modus = r ? r.modus : std();
+    const vorher = fw.konfig.regeln.find(x => x.port === port);
+    const anders = JSON.stringify(r || null) !== JSON.stringify(vorher || null);
+    const chips = r ? r.erlaubt.map((e, i) => '<span class="chip" title="' + esc(e.notiz || rechner(e.quelle)) + '">' + esc(e.quelle) +
+      ' <small>' + esc(e.notiz || rechner(e.quelle)) + (z.verb[e.quelle] ? ' · ' + zahl(z.verb[e.quelle]) : '') + '</small>' +
+      '<button type="button" data-a="weg" data-i="' + i + '" aria-label="' + esc(e.quelle) + ' entfernen">×</button></span>').join('') : '';
+    return '<tr data-port="' + port + '"' + (anders ? ' class="fw-geaendert"' : '') + '><td class="mono">' + port + '</td>' +
+      '<td>' + (r ? '<input class="fw-name" value="' + esc(r.name) + '" placeholder="Name" aria-label="Name">' : esc(fw.kritisch[port] || '')) +
+      '<div class="hinweis">' + (pv ? esc(pv.container) + (pv.ziel && pv.ziel !== port ? ' (' + pv.ziel + ' im Container)' : '') : 'nicht veröffentlicht') + '</div></td>' +
+      '<td><select data-a="modus" aria-label="Zugang Port ' + port + '"><option value=""' + (r ? '' : ' selected') + '>Standard (' + MODUS[std()] + ')</option>' +
+        Object.keys(MODUS).map(m => '<option value="' + m + '"' + (r && m === modus ? ' selected' : '') + '>' + MODUS[m] + '</option>').join('') + '</select>' +
+        (pv && pv.ipv6 && modus !== 'offen' ? ' <span class="badge gefahr" title="Docker veröffentlicht den Port auch über IPv6. Diese Verbindungen laufen an der ' +
+          'Firewall vorbei. Port nur über IPv4 veröffentlichen (Installationsanleitung, Schritt 10).">IPv6 nicht gefiltert</span>' : '') + '</td>' +
+      '<td class="d">' + (r && modus !== 'offen' ? (r.erlaubt.length > 6 ? '<details data-port="' + port + '"' + (fwOffen.has(port) ? ' open' : '') +
+        '><summary>' + r.erlaubt.length + ' Rechner und Netze</summary>' : '') +
+        '<div class="chips">' + (chips || '<span class="info">' + (modus === 'gesperrt' ? 'niemand' : 'noch niemand eingetragen') + '</span>') +
+        '</div><form class="fw-neu" data-port="' + port + '"><input name="quelle" class="mono" placeholder="IP oder Netz" aria-label="IP oder Netz">' +
+        '<input name="notiz" placeholder="Notiz" aria-label="Notiz"><button class="klein">Hinzufügen</button></form>' + (r.erlaubt.length > 6 ? '</details>' : '') :
+        '<span class="info">' + (modus === 'offen' ? 'alle' : 'niemand (Standard)') + (r && z.offen ? ' · ' + zahl(z.offen) : '') + '</span>') + '</td>' +
+      '<td>' + (anzahlAndere(r, z, modus) ? '<span class="badge ' + (modus === 'gesperrt' ? 'gefahr' : 'warn') + '">' + zahl(anzahlAndere(r, z, modus)) + ' ' +
+        (modus === 'gesperrt' ? 'abgewiesen' : 'nicht eingetragen') + '</span>' : '<span class="info">' + (modus === 'offen' ? '' : '–') + '</span>') + '</td>' +
+      '<td>' + (r && modus !== 'offen' ? '<label class="wahl" title="erlaubte Verbindungen im Kernel-Log protokollieren (je Minute höchstens 10)">' +
+        '<input type="checkbox" data-a="log"' + (r.protokollieren ? ' checked' : '') + '> protokollieren</label>' : '') + '</td></tr>';
+  });
+  $('#fw-regeln').innerHTML = '<div class="card-kopf"><div><h2 class="card-titel">Ports</h2><p class="card-text">Alle von außen erreichbaren ' +
+    'Docker-Ports und alle Regeln. Zahlen = neue Verbindungen seit ' + esc(seit) + ' (zählen ab jedem Speichern neu).</p></div></div>' +
+    '<table><thead><tr><th>Port</th><th>Dienst</th><th>Zugang</th><th>Erlaubte Rechner und Netze</th><th>Andere</th><th></th></tr></thead>' +
+    '<tbody>' + zeilen.join('') + '</tbody></table>';
+
+  const u = fwEntwurf ? fwUnterschiede() : [];
+  $('#fw-leiste').hidden = !fwEntwurf;
+  $('#fw-leiste').innerHTML = '<div class="card-inhalt"><strong>' + (u.length === 1 ? '1 Änderung' : u.length + ' Änderungen') + '</strong>' +
+    '<span class="info">' + esc(u.slice(0, 3).join(' · ')) + (u.length > 3 ? ' …' : '') + '</span><span style="flex:1"></span>' +
+    '<button class="haupt" data-a="speichern"' + (u.length ? '' : ' disabled') + '>Speichern</button><button data-a="verwerfen">Verwerfen</button></div>';
+
+  fwVorschlaege();
+  fwClients();
+  fwAbsender('#fw-dicom', 'DICOM-Absender', fw.dienstports.dicom, fw.absender.dicom, true);
+  fwAbsender('#fw-hl7', 'HL7-Absender', fw.dienstports.hl7, fw.absender.hl7, false);
+
+  const ART = { sperre: ['abgewiesen', 'gefahr'], probe: ['Probelauf: nicht eingetragen', 'warn'], erlaubt: ['erlaubt, protokolliert', 'gut'],
+    standard: [std() === 'gesperrt' ? 'Standard: abgewiesen' : 'Standard: nicht eingetragen', std() === 'gesperrt' ? 'gefahr' : 'warn'] };
+  $('#fw-versuche').innerHTML = '<summary><span class="card-titel">Verbindungen an Regeln</span><span class="card-text">' +
+    zahl(fw.versuche.length) + ' Quellen in 7 Tagen, aus dem Kernel-Log (je Port höchstens 10 in der Minute)</span></summary>' +
+    '<table><thead><tr><th>Art</th><th>Port</th><th>Quelle</th><th>Rechner</th><th>Anzahl</th><th>zuletzt</th><th></th></tr></thead><tbody>' +
+    (fw.versuche.map(v => '<tr><td><span class="badge ' + ART[v.art][1] + '">' + ART[v.art][0] + '</span></td><td class="mono">' +
+      // port 0: Host-Port unklar (Sammelregel, mehrere oder kein Host-Port fuehren auf ziel im Container), kein Erlauben
+      (v.port || esc(v.ziel) + ' im Container') + '</td>' +
+      '<td class="mono">' + esc(v.quelle) + '</td><td>' + esc(rechner(v.quelle)) + '</td><td>' + zahl(v.anzahl) + '</td><td>' + esc(zeit(v.zuletzt)) + '</td><td>' +
+      (v.port && v.art !== 'erlaubt' && !eingetragen(v.port, v.quelle) ? '<button class="klein" data-a="dazu" data-port="' + v.port + '" data-ip="' + esc(v.quelle) +
+        '" data-notiz="' + esc(rechner(v.quelle)) + '">Erlauben</button>' : '') + '</td></tr>').join('') || leer(7, 'Keine.')) + '</tbody></table>';
+}
+
+// Neu erkannt: Client-Netze, Geraete, Absender, nicht eingetragene und abgewiesene Verbindungen (firewall.py vorschlaege)
+const WAS = { clients: ['Client-PCs', 'hell'], dicom: ['DICOM-Gerät', 'rahmen'], hl7: ['HL7-Absender', 'rahmen'],
+  'versuch-probe': ['Probelauf: nicht eingetragen', 'warn'], 'versuch-sperre': ['abgewiesen', 'gefahr'], 'versuch-standard': ['abgewiesen', 'gefahr'] };
+function fwVorschlaege() {
+  const liste = vorschlaege(), aus = (fwK().ausgeblendet || []).length;
+  const dienst = p => fw.kritisch[p] || (regel(p) || {}).name || '';
+  $('#fw-vorschlaege').classList.toggle('neu', liste.length > 0);
+  $('#fw-vorschlaege').innerHTML = '<div class="card-kopf"><div><h2 class="card-titel">Neu erkannt' +
+    (liste.length ? ' <span class="badge warn">' + liste.length + '</span>' : '') + '</h2><p class="card-text">' +
+    (liste.length ? 'Für ihren Port noch nicht eingetragen. „Erlauben“ trägt sie ein, „Ausblenden“ blendet sie dauerhaft aus. Beides gilt nach „Speichern“.'
+      : 'Nichts Neues: alles Erkannte ist eingetragen.') + '</p></div>' +
+    '<div class="zeile">' + (liste.length > 1 ? '<button class="klein" data-a="alle-erlauben">Alle ' + liste.length + ' erlauben</button>' : '') +
+    '<button class="klein leise" data-a="einlesen">Jetzt suchen</button></div></div>' +
+    (liste.length ? '<table><thead><tr><th>Was</th><th>Quelle</th><th>Name</th><th>Port</th><th>Verbindungen</th><th>zuletzt</th><th></th></tr></thead><tbody>' +
+      liste.map(x => '<tr><td><span class="badge ' + WAS[x.art][1] + '">' + WAS[x.art][0] + '</span></td><td class="mono">' + esc(x.quelle) + '</td>' +
+        '<td class="d">' + esc(x.notiz || rechner(x.quelle)) + '</td><td><span class="mono">' + x.port + '</span> <span class="hinweis">' + esc(dienst(x.port)) + '</span></td>' +
+        '<td>' + (x.anzahl ? zahl(x.anzahl) : '') + '</td><td>' + esc(zeit(x.zuletzt)) + '</td><td><div class="knoepfe">' +
+        '<button class="klein haupt" data-a="dazu" data-port="' + x.port + '" data-ip="' + esc(x.quelle) + '" data-notiz="' + esc(x.notiz || rechner(x.quelle)) + '">Erlauben</button>' +
+        '<button class="klein leise" data-a="ausblenden" data-port="' + x.port + '" data-ip="' + esc(x.quelle) + '">Ausblenden</button></div></td></tr>').join('') +
+      '</tbody></table>' : '') +
+    (aus ? '<div class="card-fuss"><span class="hinweis">' + aus + ' ausgeblendet</span><button class="klein leise" data-a="einblenden">Wieder anzeigen</button></div>' : '');
+}
+
+// Client-PCs je Netz: alle, die die DNS-Suche kennt, und ob DICOM sie durchlaesst. Ohne Namensmuster (FW_CLIENT_NAMES
+// leer) ist die Suche aus und die Karte samt Hilfetext ausgeblendet.
+function fwClients() {
+  const c = fw.clients || {}, netze = new Map();
+  $('#fw-clients').hidden = $('#fw-hilfe-clients').hidden = !c.muster;
+  $('#fw-muster').textContent = c.muster || '';
+  if (!c.muster) return;
+  (c.pcs || []).forEach(p => { const n = p.ip.replace(/\.\d+$/, '.0/24'); netze.set(n, (netze.get(n) || []).concat(p)); });
+  const dicom = fw.dienstports.dicom, ohne = pcs => pcs.filter(p => !intern(p.ip) && !frei(dicom, p.ip)).length;
+  const alle = [...netze.values()].reduce((a, pcs) => a + ohne(pcs), 0);
+  $('#fw-clients').innerHTML = '<summary><span class="card-titel">Client-PCs</span><span class="card-text">' + zahl((c.pcs || []).length) +
+    ' im DNS (Muster <span class="mono">' + esc(c.muster) + '</span>) in ' + netze.size + ' Netzen' +
+    (alle ? ', <span class="warnung">' + alle + ' für DICOM nicht eingetragen</span>' : '') +
+    ', Stand ' + esc(zeit(c.stand) || '–') + '</span></summary>' +
+    '<table><thead><tr><th>Netz</th><th>PCs</th><th>Namen</th><th>DICOM (' + dicom + ')</th></tr></thead><tbody>' +
+    ([...netze.entries()].sort((a, b) => b[1].length - a[1].length).map(([n, pcs]) => '<tr><td class="mono">' + n + '</td><td>' + pcs.length + '</td>' +
+      '<td class="d hinweis">' + esc(pcs.map(p => p.name).sort().join(', ')) + '</td><td>' +
+      (pcs.every(p => intern(p.ip)) ? '<span class="badge gefahr">überschneidet Docker-Netz, erreicht das PACS nicht</span>'
+        : ohne(pcs) ? '<span class="badge warn">' + ohne(pcs) + ' nicht eingetragen</span>' : '<span class="badge gut">eingetragen</span>') + '</td></tr>').join('') ||
+      leer(4, 'Noch keine Suche gelaufen, „Jetzt suchen“ unter Neu erkannt.')) + '</tbody></table>';
+}
+
+// neue Verbindungen von nicht eingetragenen Rechnern (ohne eigene Regel: alle, die unter den Standard fallen)
+const anzahlAndere = (r, z, modus) => (modus === 'offen' ? 0 : r ? z.fremd : z.std || 0);
+
+function fwAbsender(ziel, titel, port, liste, mitAe) {
+  const r = regel(port), fehlen = liste.filter(a => !intern(a.ip) && !eingetragen(port, a.ip));
+  $(ziel).innerHTML = '<summary><span class="card-titel">' + titel + '</span><span class="card-text">' + zahl(liste.length) + ' aus dem Log von dcm4chee' +
+    (fehlen.length ? ', <span class="warnung">' + fehlen.length + ' nicht eingetragen</span>' : '') + '</span></summary>' +
+    '<div class="card-kopf"><p class="card-text">Alle 5 Minuten ergänzt, Stand ' + esc(zeit(fw.absender_stand)) + '. ' +
+    (r ? 'Port ' + port + ': ' + MODUS[r.modus] + '.' : 'Port ' + port + ' folgt dem Standard (' + MODUS[std()] + ').') + '</p></div>' +
+    '<table><thead><tr>' + (mitAe ? '<th>AE-Titel</th>' : '') + '<th>IP</th><th>Rechner</th><th>Verbindungen</th><th>zuerst</th><th>zuletzt</th><th>Port ' + port + '</th><th></th></tr></thead><tbody>' +
+    (liste.map(a => '<tr>' + (mitAe ? '<td class="mono">' + esc(a.ae) + '</td>' : '') + '<td class="mono">' + esc(a.ip) + '</td><td>' + esc(rechner(a.ip)) + '</td>' +
+      '<td>' + zahl(a.anzahl) + '</td><td>' + esc(zeit(a.erst)) + '</td><td>' + esc(zeit(a.zuletzt)) + '</td><td>' +
+      (intern(a.ip) ? '<span class="badge hell">intern, nicht betroffen</span>' : eingetragen(port, a.ip) ? '<span class="badge gut">eingetragen</span>' :
+        '<span class="badge warn">nicht eingetragen</span>') + '</td><td>' +
+      (!intern(a.ip) && !eingetragen(port, a.ip) ? '<button class="klein" data-a="dazu" data-port="' + port + '" data-ip="' + esc(a.ip) + '" data-notiz="' +
+        esc(a.ae || rechner(a.ip)) + '">Erlauben</button>' : '') + '</td></tr>').join('') || leer(mitAe ? 8 : 7, 'Noch keine Absender erfasst.')) +
+    '</tbody></table>';
+}
+
+$('#firewall').onclick = ev => {
+  const b = ev.target.closest('button[data-a]');
+  if (!b) return;
+  const tr = b.closest('tr[data-port]'), port = Number(b.dataset.port || (tr && tr.dataset.port));
+  const a = b.dataset.a;
+  if (a === 'neu') return fwLaden(false);
+  if (a === 'einlesen') return ausfuehren(((fw.clients || {}).muster ? 'Geräte, Absender und Client-PCs' : 'Geräte und Absender') + ' suchen', () => fwLaden(true));
+  if (a === 'speichern') return fwSpeichern();
+  if (a === 'verwerfen') { fwEntwurf = null; return fwZeigen(); }
+  if (a === 'weg') return fwAendern(k => k.regeln.find(r => r.port === port).erlaubt.splice(Number(b.dataset.i), 1));
+  if (a === 'dazu') {
+    fwDazu(port, b.dataset.ip, b.dataset.notiz);
+    return melden(b.dataset.ip + ' für Port ' + port + ' vorgemerkt, gilt nach „Speichern“');
+  }
+  if (a === 'alle-erlauben') {
+    const liste = vorschlaege();
+    liste.forEach(x => fwDazu(x.port, x.quelle, x.notiz || rechner(x.quelle)));
+    return melden(liste.length + ' Einträge vorgemerkt, gilt nach „Speichern“');
+  }
+  if (a === 'ausblenden') return fwAendern(k => (k.ausgeblendet = (k.ausgeblendet || []).concat(port + ' ' + b.dataset.ip)));
+  if (a === 'einblenden') return fwAendern(k => (k.ausgeblendet = []));
+};
+
+// aufgeklappte lange Listen merken ("toggle" steigt nicht auf, deshalb beim Herabsteigen abfangen)
+$('#firewall').addEventListener('toggle', ev => {
+  const p = Number(ev.target.dataset && ev.target.dataset.port);
+  if (p) ev.target.open ? fwOffen.add(p) : fwOffen.delete(p);
+}, true);
+
+$('#firewall').onchange = ev => {
+  const t = ev.target, tr = t.closest('tr[data-port]'), port = tr && Number(tr.dataset.port);
+  if (t.id === 'fw-aktiv') {
+    if (!t.checked && !confirm('Firewall ausschalten? Danach sind alle Ports für alle offen (gilt nach „Speichern“).')) { t.checked = true; return; }
+    return fwAendern(k => (k.aktiv = t.checked));
+  }
+  if (t.id === 'fw-standard') {
+    const m = t.value, ohne = (fw.veroeffentlicht || []).filter(v => !regel(v.port)).map(v => v.port + (fw.kritisch[v.port] ? ' (' + fw.kritisch[v.port] + ')' : ''));
+    if (m === 'gesperrt' && !confirm('Standard „gesperrt“: alle Ports ohne eigene Regel sind danach von außen zu, auch künftig veröffentlichte.\n\n' +
+      'Heute ohne eigene Regel: ' + (ohne.join(', ') || 'keine') + '\n\nFür ' + fw.dienstports.web.join('/') +
+      ' vorher eine Regel „offen“ oder die Netze eintragen.')) { t.value = std(); return; }
+    return fwAendern(k => (k.standard = m));
+  }
+  if (t.dataset.a === 'modus') {
+    const r = regel(port), m = t.value || 'standard';
+    if ((m === 'gesperrt' || (m === 'standard' && std() === 'gesperrt')) && fw.kritisch[port] && !confirm('Port ' + port + ' (' + fw.kritisch[port] + ') sperren? Danach kommen nur noch die eingetragenen ' +
+      'Rechner durch, alle anderen werden abgewiesen.' + (r && r.modus === 'probelauf' ? '\n\nVorher im Probelauf prüfen: unten darf niemand mehr als „nicht eingetragen“ stehen.' : ''))) {
+      t.value = r ? r.modus : '';
+      return;
+    }
+    if ((m === 'standard' || m === 'offen') && r && r.erlaubt.length && !confirm('Port ' + port + ' auf ' + (m === 'offen' ? '„offen“' :
+      'Standard (' + MODUS[std()] + ')') + ' stellen? Die ' + r.erlaubt.length + ' eingetragenen Rechner gehen verloren.')) { t.value = r.modus; return; }
+    return fwAendern(k => {
+      const i = k.regeln.findIndex(x => x.port === port);
+      if (m === 'standard') { if (i >= 0) k.regeln.splice(i, 1); }
+      else if (i >= 0) k.regeln[i].modus = m;
+      else k.regeln.push({ port, name: fw.kritisch[port] || (fw.veroeffentlicht.find(v => v.port === port) || {}).container || '',
+        modus: m, protokollieren: false, erlaubt: [] });
+    });
+  }
+  if (t.dataset.a === 'log') return fwAendern(k => (k.regeln.find(r => r.port === port).protokollieren = t.checked));
+  if (t.classList.contains('fw-name')) return fwAendern(k => (k.regeln.find(r => r.port === port).name = t.value.trim()));
+};
+
+$('#firewall').onsubmit = ev => {
+  ev.preventDefault();
+  const f = ev.target, q = f.quelle.value.trim();
+  if (!/^\d{1,3}(\.\d{1,3}){3}(\/\d{1,2})?$/.test(q)) return melden('Bitte eine IPv4-Adresse oder ein Netz eingeben, z. B. 192.0.2.18 oder 192.0.2.0/24', true);
+  fwDazu(Number(f.dataset.port), q, f.notiz.value.trim());
+};
+
+// ---------------------------------------------------------------- Protokoll
+(() => {
+  // Liest die Protokollzeilen aus der verschluesselten Datenbank auf dem Server (Dienst /admin/dienst/protokoll,
+  // verwaltung-dienst.py) und zeigt Studien- und Patientensuche, Studie geoeffnet und Bericht geoeffnet (auch aus der
+  // dcm4chee-Oberflaeche), neueste oben. Dieselbe Person mit derselben Studie oder Suche innerhalb von 30 Minuten ist ein
+  // Eintrag. Name und Studie kommen beim Anzeigen per QIDO aus dem PACS. Jede einzelne Anfrage steht dort als Quelle
+  // "zugriffe".
+  // Quelle admin (r = "admin"): Aenderungen ueber /admin/, von nginx; k = Beschreibung der Seite (URL-kodiert).
+  // daten/rechner.json (optional, von Hand abgelegt): PC-Name je IP; fehlt die Datei, steht nur die IP da.
+  const FELDER = '&includefield=00100010,00100020,00080020,00080061,00080050';
+  const MAX = 2000;
+  const f = document.getElementById('p-form');
+  const info = document.getElementById('p-info');
+  const tag = d => d.toLocaleDateString('sv'); // JJJJ-MM-TT in Ortszeit
+  f.von.value = tag(new Date(Date.now() - 30 * 864e5));
+  f.bis.value = tag(new Date());
+  let zeilen = [];
+
+  const patient = s => ({
+    name: ((v(s, '00100010') || {}).Alphabetic || '').replace(/\^+/g, ' ').trim(),
+    pid: v(s, '00100020'),
+    studie: [datum(v(s, '00080020')), ((s['00080061'] || {}).Value || []).join('/'), v(s, '00080050')].filter(Boolean).join(' · '),
+  });
+  const NAMEN = {
+    '00100010': 'Name', PatientName: 'Name', '00100020': 'Patienten-ID', PatientID: 'Patienten-ID',
+    '00080050': 'Accession', AccessionNumber: 'Accession', '00080020': 'Datum', StudyDate: 'Datum',
+    '00080061': 'Modalität', ModalitiesInStudy: 'Modalität', '00081030': 'Beschreibung', StudyDescription: 'Beschreibung',
+  };
+
+  // Anfrage -> Ereignis. Nur StudyInstanceUID als Filter = automatisch (OHIF beim Oeffnen, diese Seite beim
+  // Nachschlagen), kommt nicht in die Ansicht. e.r ist die Adresse aus dem Browser, auch bei der dcm4chee-Oberflaeche
+  // (nginx protokolliert $request_uri, nicht die intern umgeleitete).
+  function art(e) {
+    if (e.r === 'admin') {
+      let k = '';
+      try { k = decodeURIComponent(e.k || ''); } catch (x) { k = e.k || ''; }
+      const [was, ...rest] = k.split(' · ');
+      const s = (e.uri.match(/\/studies\/([0-9.]+)/) || [])[1];
+      return { a: (was || e.m + ' ' + e.uri) + ' (Verwaltung)', s: /gelöscht/.test(was) ? '' : s, d: rest.join(' · ') };
+    }
+    const u = new URL(e.r, location.origin);
+    const korb = u.pathname.startsWith('/dcm4chee-arc/aets/' + K.iocmAet + '/');   // Ansicht der abgelehnten Studien
+    const p = u.pathname.replace(/^\/dcm4chee-arc\/aets\/[^/]+/, '');
+    const q = u.searchParams;
+    let m;
+    if ((m = p.match(/^\/rs\/studies\/([^/]+)\/series$/))) return { a: 'Studie geöffnet', s: m[1] };
+    if ((m = p.match(/^\/rs\/studies\/([^/]+)\/.+\/metadata$/))) return { a: 'Bericht geöffnet', s: m[1] };
+    if (p === '/wado') return { a: 'Bericht geöffnet', s: q.get('studyUID') };
+    if (p !== '/rs/studies' && p !== '/rs/patients') return null;
+    const filter = [...q].filter(([k]) => !/^(limit|offset|fuzzymatching|includefield|orderby)$/i.test(k));
+    const d = filter.map(([k, x]) => (NAMEN[k] || k) + ': ' + x).join(', ') || 'ohne Filter';
+    if (p === '/rs/patients') return { a: 'Patientensuche', d };
+    if (filter.length && filter.every(([k]) => /^(StudyInstanceUID|0020000D)$/i.test(k))) return null;
+    return { a: 'Suche', d: (korb ? 'abgelehnte Studien · ' : '') + d };
+  }
+
+  // je Zeile ein JSON (NDJSON vom Dienst /admin/dienst/protokoll)
+  async function laden(von, bis) {
+    const r = await fetch('/admin/dienst/protokoll?quelle=ereignisse,admin&von=' + von + '&bis=' + bis, { cache: 'no-store' });
+    if (!r.ok) throw new Error('Protokoll: HTTP ' + r.status);
+    return (await r.text()).split('\n').filter(Boolean).map(l => {
+      try { return JSON.parse(l); } catch (e) { return null; }
+    }).filter(Boolean);
+  }
+
+  // Filter "Art" (erweiterte Filter)
+  function passtArt(e, art) {
+    switch (art) {
+      case 'studie': return e.a === 'Studie geöffnet';
+      case 'bericht': return e.a === 'Bericht geöffnet';
+      case 'suche': return e.a === 'Suche' || e.a === 'Patientensuche';
+      case 'admin': return e.r === 'admin';
+      case 'fehler': return /abgelehnt/.test(e.a) || e.status >= 400;
+      default: return true;
+    }
+  }
+
+  // Schnellwahl Zeitraum: heute, letzte 7 bzw. 30 Tage
+  document.querySelector('#p-form .schnell').onclick = ev => {
+    const b = ev.target.closest('button[data-tage]');
+    if (!b) return;
+    f.von.value = tag(new Date(Date.now() - +b.dataset.tage * 864e5));
+    f.bis.value = tag(new Date());
+    f.requestSubmit();
+  };
+
+  async function qido(q) {
+    const r = await fetch(RS + '/studies?' + q + FELDER);
+    return r.status === 200 ? r.json() : []; // 204 = nichts gefunden
+  }
+
+  f.onsubmit = async ev0 => {
+    ev0.preventDefault();
+    info.textContent = 'lade …';
+    document.getElementById('p-csv').disabled = true;
+    try {
+      const ab = new Date(f.von.value + 'T00:00').getTime(), bis = new Date(f.bis.value + 'T00:00').getTime() + 864e5;
+      const konto = f.konto.value.trim().toLowerCase(), pid = f.pid.value.trim();
+      const pc = f.pc.value.trim().toLowerCase(), text = f.text.value.trim().toLowerCase(), name = f.name.value.trim();
+      const rechner = await fetch('/admin/daten/rechner.json').then(r => (r.ok ? r.json() : {})).catch(() => ({}));
+      let ev = (await laden(f.von.value, f.bis.value))
+        .map(e => ({ ...e, ms: Date.parse(e.t), ...art(e) }))
+        .filter(e => e.a && e.u && e.ms >= ab && e.ms < bis && (!konto || e.u.toLowerCase().includes(konto)) && passtArt(e, f.art.value) &&
+          (!pc || ((rechner[e.ip] || '') + ' ' + (e.ip || '')).toLowerCase().includes(pc)) &&
+          (!text || [e.a, e.d, e.pid, e.s].join(' ').toLowerCase().includes(text)))
+        .sort((x, y) => x.ms - y.ms);
+      const zuletzt = {};
+      ev = ev.filter(e => {
+        if (e.r === 'admin') return true;
+        const k = e.u + '|' + e.a + '|' + (e.s || e.d);
+        const neu = !(k in zuletzt) || e.ms - zuletzt[k] > 30 * 60e3;
+        zuletzt[k] = e.ms;
+        return neu;
+      });
+      const pat = {};
+      if (pid) {
+        (await qido('PatientID=' + encodeURIComponent(pid) + '&limit=1000')).forEach(s => (pat[v(s, '0020000D')] = patient(s)));
+        ev = ev.filter(e => (e.s && pat[e.s]) || (e.d && e.d.includes(pid)) || e.pid === pid);
+      }
+      // Patientenname: Studien dieses Namens aus dem PACS, dazu Suchen (auch Patientensuchen) und Aenderungen mit dem
+      // Namen in den Details
+      if (name) {
+        const treffer = {}, klein = name.replace(/\*$/, '').toLowerCase();
+        (await qido('PatientName=' + encodeURIComponent(name.replace(/\*?$/, '*')) + '&fuzzymatching=false&limit=1000'))
+          .forEach(s => (treffer[v(s, '0020000D')] = patient(s)));
+        Object.assign(pat, treffer);
+        ev = ev.filter(e => (e.s && treffer[e.s]) || (e.d && e.d.toLowerCase().includes(klein)));
+      }
+      ev = ev.reverse().slice(0, MAX);
+      const offen = [...new Set(ev.map(e => e.s).filter(s => s && !pat[s]))];
+      for (let i = 0; i < offen.length; i += 40) {
+        (await qido('StudyInstanceUID=' + offen.slice(i, i + 40).join(',') + '&limit=100')).forEach(s => (pat[v(s, '0020000D')] = patient(s)));
+      }
+      zeilen = ev.map(e => {
+        const p = pat[e.s] || {};
+        return [new Date(e.ms).toLocaleString(K.locale), e.u, rechner[e.ip] ? rechner[e.ip] + ' (' + e.ip + ')' : e.ip,
+          e.a + (e.status >= 400 ? ' (HTTP ' + e.status + ')' : ''),
+          p.name || '', p.pid || e.pid || '', p.studie || (e.s ? e.s : ''), e.d || ''];
+      });
+      // Anzeige (zeilen bleiben fuer die CSV): Tage als Zwischenzeile; Wer = Konto ohne Domain, darunter der PC; Was =
+      // Aktion als Badge (Verwaltung und Abgelehntes fallen auf), darunter jedes Detail in einer eigenen Zeile
+      const farbe = a => (/abgelehnt/.test(a) ? 'gefahr' : /Verwaltung/.test(a) ? 'warn' : /geöffnet/.test(a) ? 'hell' : /Suche/.test(a) ? 'rahmen' : '');
+      let tagZuletzt = '';
+      document.getElementById('p-t').innerHTML = ev.map((e, i) => {
+        const [, wer, pc, aktion, name, nr, studie, details] = zeilen[i];
+        const d = new Date(e.ms);
+        const t = d.toLocaleDateString(K.locale, { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' });
+        const kopf = t === tagZuletzt ? '' : ((tagZuletzt = t), '<tr class="tag"><td colspan="5">' + esc(t) + '</td></tr>');
+        const teile = details.split(' · ').filter(Boolean);
+        return kopf + '<tr><td class="zeit">' + d.toLocaleTimeString(K.locale) + '</td>' +
+          '<td><div>' + esc(wer.replace(/@.*$/, '')) + '</div><div class="neben">' + esc(pc) + '</div></td>' +
+          '<td><span class="badge ' + farbe(aktion) + '">' + esc(aktion) + '</span>' + (teile.length ? '<ul class="details">' + teile.map(x =>
+            '<li>' + esc(x) + '</li>').join('') + '</ul>' : '') + '</td>' +
+          '<td><div>' + esc(name) + '</div><div class="neben mono">' + esc(nr) + '</div></td>' +
+          '<td class="neben">' + esc(studie) + '</td></tr>';
+      }).join('') || '<tr><td colspan="5" class="leer">Keine Einträge in diesem Zeitraum.</td></tr>';
+      info.textContent = zeilen.length + ' Einträge' + (zeilen.length === MAX ? ', nur die neuesten ' + MAX + ', Filter enger setzen' : '');
+      document.getElementById('p-csv').disabled = !zeilen.length;
+    } catch (e) {
+      info.textContent = 'Fehler: ' + e.message;
+    }
+  };
+
+  // CSV fuer Excel (Semikolon, UTF-8 mit BOM). Werte mit = + - @ am Anfang bekommen ein ', sonst rechnet Excel.
+  document.getElementById('p-csv').onclick = () => {
+    const kopf = ['Zeit', 'Konto', 'PC', 'Aktion', 'Patient', 'Patienten-ID', 'Studie', 'Details'];
+    const zelle = x => '"' + String(x).replace(/^([=+\-@])/, "'$1").replace(/"/g, '""') + '"';
+    const csv = [kopf, ...zeilen].map(z => z.map(zelle).join(';')).join('\r\n');
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(new Blob(['﻿' + csv], { type: 'text/csv' }));
+    a.download = 'pacs-protokoll-' + f.von.value + '-bis-' + f.bis.value + '.csv';
+    a.click();
+  };
+})();
+
+zeigen();
+</script>
+</body>
+</html>

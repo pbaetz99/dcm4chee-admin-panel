@@ -1,0 +1,153 @@
+/* Aussehen der PACS-Verwaltung (/admin/admin.css). Bauweise und Varianten wie shadcn/ui (Button, Input, Card, Tabs,
+   Table, Badge, Alert, Progress, Toast), als reines CSS, ohne Build und ohne CDN. Die Farbwerte sind die
+   shadcn-Variablen des OHIF-Viewers, dadurch sieht die Verwaltung aus wie OHIF. Werte "H S L" wie bei shadcn,
+   hsl(var(--primary) / .5) = halb durchsichtig. Schrift: Inter, wenn installiert, sonst die Systemschrift.
+   Styles for the admin page: shadcn/ui-like components in plain CSS with the OHIF viewer's dark colours. */
+
+:root {
+  --background: 0 0% 0%;
+  --foreground: 0 0% 98%;
+  --card: 234 64% 10%;
+  --popover: 219 90% 15%;
+  --primary: 214 98% 60%;
+  --primary-foreground: 0 0% 98%;
+  --secondary: 214 65% 36%;
+  --secondary-foreground: 200 50% 84%;
+  --muted: 234 64% 10%;
+  --muted-foreground: 200 46% 65%;
+  --accent: 217 79% 24%;
+  --accent-foreground: 0 0% 98%;
+  --destructive: 0 62.8% 30.6%;
+  --destructive-foreground: 0 0% 98%;
+  --border: 0 0% 14.9%;
+  --input: 236 52% 30%;
+  --ring: 214 98% 60%;
+  --highlight: 191 74% 63%;   /* OHIF: Hervorhebung */
+  --erfolg: 152 60% 45%;      /* ab hier nicht in OHIF: Zustaende */
+  --warnung: 35 85% 58%;
+  --fehler-text: 0 84% 72%;   /* lesbares Rot auf Dunkel, destructive ist als Flaeche gedacht */
+  --radius: .5rem;
+  color-scheme: dark;
+}
+
+*, ::before, ::after { box-sizing: border-box; }
+body { margin: 0; min-height: 100vh; background: hsl(var(--background)); color: hsl(var(--foreground));
+  font: 14px/1.5 Inter, system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif; -webkit-font-smoothing: antialiased; }
+h1, h2, h3, p, ol, ul, dl { margin: 0; }
+a { color: hsl(var(--highlight)); text-underline-offset: 3px; }
+code, .mono { font-family: ui-monospace, Menlo, Consolas, 'Liberation Mono', monospace; font-size: 13px; }
+:focus-visible { outline: 2px solid hsl(var(--ring)); outline-offset: 2px; }
+[hidden] { display: none !important; }
+svg.icon { width: 16px; height: 16px; flex: none; color: hsl(var(--muted-foreground)); }
+
+/* Kopfzeile wie im Viewer, Reiter wie shadcn Tabs (Leiste gedaempft, aktiver Reiter hell) */
+header { position: sticky; top: 0; z-index: 20; display: flex; align-items: center; gap: 20px; height: 56px; padding: 0 24px;
+  border-bottom: 1px solid hsl(var(--border)); background: hsl(var(--background) / .9); backdrop-filter: blur(8px); }
+header img { height: 24px; }   /* Logo aus config.js, fuer den dunklen Kopf ein helles verwenden */
+header .titel { font-size: 15px; font-weight: 600; white-space: nowrap; }
+header nav { display: inline-flex; gap: 2px; padding: 4px; border-radius: var(--radius); background: hsl(var(--muted)); }
+header nav a { padding: 5px 12px; border-radius: calc(var(--radius) - 2px); color: hsl(var(--muted-foreground)); font-weight: 500;
+  text-decoration: none; white-space: nowrap; transition: color .15s, background-color .15s; }
+header nav a:hover { color: hsl(var(--foreground)); }
+header nav a[aria-current] { background: hsl(var(--background)); color: hsl(var(--foreground)); box-shadow: 0 1px 3px rgb(0 0 0 / .5); }
+header .konto { min-width: 0; margin-left: auto; overflow: hidden; color: hsl(var(--muted-foreground)); font-size: 13px;
+  white-space: nowrap; text-overflow: ellipsis; }
+
+main { max-width: 1600px; margin: 0 auto; padding: 24px; }
+main > section, .stapel { display: grid; gap: 16px; align-content: start; }
+.seitenkopf h1 { font-size: 22px; font-weight: 600; letter-spacing: -.02em; }
+.seitenkopf p { margin-top: 4px; color: hsl(var(--muted-foreground)); max-width: 90ch; }
+
+/* Card */
+.card { background: hsl(var(--card)); border: 1px solid hsl(var(--border)); border-radius: calc(var(--radius) + 4px);
+  box-shadow: 0 1px 3px rgb(0 0 0 / .4); min-width: 0; }
+.card-kopf { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; padding: 18px 20px 0; }
+.card-titel { font-size: 15px; font-weight: 600; letter-spacing: -.01em; }
+.card-text { margin-top: 2px; color: hsl(var(--muted-foreground)); font-size: 13px; }
+.card-inhalt { padding: 16px 20px 20px; }
+.card-fuss { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; padding: 0 20px 20px; }
+
+/* Button: ohne Klasse = outline, haupt = default, zweit = secondary, leise = ghost, gefahr = destructive, klein = sm */
+button { display: inline-flex; align-items: center; justify-content: center; gap: 6px; height: 36px; padding: 0 14px;
+  border: 1px solid hsl(var(--input)); border-radius: calc(var(--radius) - 2px); background: transparent; color: hsl(var(--foreground));
+  font: inherit; font-weight: 500; white-space: nowrap; cursor: pointer; transition: background-color .15s, border-color .15s, color .15s; }
+button:hover { background: hsl(var(--accent)); }
+button.haupt { background: hsl(var(--primary)); border-color: transparent; color: hsl(var(--primary-foreground)); }
+button.haupt:hover { background: hsl(var(--primary) / .85); }
+button.zweit { background: hsl(var(--secondary)); border-color: transparent; color: hsl(var(--secondary-foreground)); }
+button.zweit:hover { background: hsl(var(--secondary) / .8); }
+button.leise { border-color: transparent; }
+button.gefahr { background: hsl(var(--destructive)); border-color: transparent; color: hsl(var(--destructive-foreground)); }
+button.gefahr:hover { background: hsl(0 62.8% 38%); }
+button.klein { height: 30px; padding: 0 10px; font-size: 13px; }
+button:disabled { opacity: .45; cursor: not-allowed; }
+
+/* Input, Select, Label */
+input:not([type=radio]):not([type=checkbox]), select { height: 36px; min-width: 0; padding: 0 12px; border: 1px solid hsl(var(--input));
+  border-radius: calc(var(--radius) - 2px); background: hsl(var(--background) / .35); color: hsl(var(--foreground)); font: inherit; }
+input::placeholder { color: hsl(var(--muted-foreground) / .7); }
+input:focus-visible, select:focus-visible { outline: none; border-color: hsl(var(--ring)); box-shadow: 0 0 0 3px hsl(var(--ring) / .3); }
+select option { background: hsl(var(--popover)); }
+input[type=radio], input[type=checkbox] { width: 16px; height: 16px; margin: 0; accent-color: hsl(var(--primary)); }
+label { display: flex; flex-direction: column; gap: 6px; font-size: 13px; font-weight: 500; color: hsl(var(--muted-foreground)); }
+label.wahl { flex-direction: row; align-items: center; gap: 8px; color: hsl(var(--foreground)); font-weight: 400; cursor: pointer; }
+form.leiste, .felder { display: flex; gap: 12px; flex-wrap: wrap; align-items: end; }
+
+/* Table */
+.tabelle { overflow-x: auto; }
+table { width: 100%; border-collapse: collapse; }
+th { height: 40px; padding: 0 12px; border-bottom: 1px solid hsl(var(--border)); color: hsl(var(--muted-foreground)); font-size: 13px;
+  font-weight: 500; text-align: left; white-space: nowrap; }
+td { padding: 9px 12px; border-bottom: 1px solid hsl(var(--border)); vertical-align: middle; white-space: nowrap; }
+tbody tr { transition: background-color .15s; }
+tbody tr:hover { background: hsl(var(--accent) / .3); }
+tbody tr:last-child > td { border-bottom: 0; }
+td.d { min-width: 240px; white-space: normal; }
+td.leer { padding: 28px 12px; color: hsl(var(--muted-foreground)); text-align: center; }
+
+/* Badge */
+.badge { display: inline-flex; align-items: center; gap: 4px; height: 22px; padding: 0 8px; border: 1px solid transparent;
+  border-radius: calc(var(--radius) - 2px); background: hsl(var(--secondary)); color: hsl(var(--secondary-foreground));
+  font-size: 12px; font-weight: 600; white-space: nowrap; }
+.badge.haupt { background: hsl(var(--primary)); color: hsl(var(--primary-foreground)); }
+.badge.rahmen { background: transparent; border-color: hsl(var(--input)); color: hsl(var(--muted-foreground)); font-weight: 500; }
+.badge.gut { background: hsl(var(--erfolg) / .15); color: hsl(var(--erfolg)); }
+.badge.warn { background: hsl(var(--warnung) / .15); color: hsl(var(--warnung)); }
+.badge.gefahr { background: hsl(var(--destructive) / .4); color: hsl(var(--fehler-text)); }
+.badge.hell { background: hsl(var(--highlight) / .13); color: hsl(var(--highlight)); }
+.punkt::before { content: ''; width: 6px; height: 6px; border-radius: 50%; background: currentColor; }
+
+/* Alert */
+.alert { padding: 12px 16px; border: 1px solid hsl(var(--border)); border-radius: var(--radius); background: hsl(var(--background) / .4); }
+.alert > strong:first-child { display: block; margin-bottom: 4px; font-weight: 600; }
+.alert.gefahr { border-color: hsl(var(--destructive)); background: hsl(var(--destructive) / .15); }
+.alert.gefahr > strong:first-child { color: hsl(var(--fehler-text)); }
+.alert.warn { border-color: hsl(var(--warnung) / .5); background: hsl(var(--warnung) / .07); }
+.alert.warn > strong:first-child { color: hsl(var(--warnung)); }
+.alert > * + * { margin-top: 10px; }
+.alert ol { padding-left: 20px; }
+
+/* Progress */
+.balken { height: 8px; overflow: hidden; border-radius: 999px; background: hsl(var(--primary) / .18); }
+.balken > i { display: block; height: 100%; border-radius: inherit; background: hsl(var(--primary)); }
+.balken.voll > i { background: hsl(var(--warnung)); }
+
+/* Toast: Meldungen unten rechts, Fehler bleiben stehen */
+.meldung { position: fixed; right: 24px; bottom: 24px; z-index: 30; max-width: min(460px, calc(100vw - 48px)); padding: 12px 16px;
+  border: 1px solid hsl(var(--input)); border-radius: var(--radius); background: hsl(var(--popover)); box-shadow: 0 10px 30px rgb(0 0 0 / .55); }
+.meldung:empty { display: none; }
+.meldung.fehler { border-color: hsl(var(--destructive)); background: hsl(0 45% 14%); color: hsl(var(--fehler-text)); }
+
+/* Text */
+.info, .leise, .hinweis { color: hsl(var(--muted-foreground)); }
+.hinweis { font-size: 13px; }
+.fehler { color: hsl(var(--fehler-text)); }
+.ok { color: hsl(var(--erfolg)); }
+.zeile { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+
+@media (max-width: 900px) {
+  header { flex-wrap: wrap; height: auto; padding: 8px 16px; gap: 8px 16px; }
+  header nav { order: 3; width: 100%; overflow-x: auto; }
+  main { padding: 16px; }
+}
+@media (prefers-reduced-motion: reduce) { * { transition: none !important; animation: none !important; } }

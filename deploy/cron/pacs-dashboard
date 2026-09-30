@@ -1,0 +1,8 @@
+# Zahlen fuer die Uebersicht in /admin/ (status.json) alle 5 Minuten, siehe /opt/pacs-admin/server/dashboard-status.py.
+# Writes the overview numbers every 5 minutes. Install: cp deploy/cron/pacs-dashboard /etc/cron.d/pacs-dashboard
+# Liest dieselben Einstellungen wie die systemd-Units (/etc/default/pacs-admin, als Shell-Datei eingelesen).
+# PATH mit sbin: pacs-storage.sh braucht blockdev, wipefs, blkid usw.
+SHELL=/bin/sh
+PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+MAILTO=""
+*/5 * * * * root set -a; [ ! -r /etc/default/pacs-admin ] || . /etc/default/pacs-admin; set +a; python3 /opt/pacs-admin/server/dashboard-status.py >/dev/null 2>>/var/log/pacs-dashboard.log
