@@ -1,0 +1,15 @@
+# Your site values for nginx: copy it to pacs/site.conf, the only nginx file you edit on nginx 1.25.1 or newer (it is loaded into the server block).
+# Change the value on every line that carries the marker in capitals and delete the marker with its comment (README.md).
+
+server_name pacs.example.org;                      # CHANGE-ME: the name users type in the browser
+
+# dcm4chee-arc: container name (docker ps) and http port, reachable in the Docker network that nginx shares with arc.
+# Host nginx: http://127.0.0.1:8080 (arc published there), and delete the resolver line.
+set $arc http://arc:8080;
+resolver 127.0.0.11 valid=10s ipv6=off;            # DNS of Docker; containers get a new IP when they are re-created
+
+# ---- Only for login oauth2-proxy (with basic or none ignore these lines or delete them) --------------------------------
+set $pacs_auth        http://ohif-auth:4180;       # service name and port of oauth2-proxy in your compose file
+# Admin group for /admin/ and every change: Entra ID = object id of the group (the token needs the claim groups), other
+# OIDC provider = group name as in the claim groups (Keycloak role: role:NAME). Empty is refused, never "everybody".
+set $pacs_admin_group 00000000-0000-0000-0000-000000000000;   # CHANGE-ME: the admin group
