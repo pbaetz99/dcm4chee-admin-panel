@@ -1,5 +1,5 @@
 <!doctype html>
-<!-- PACS-Verwaltung fuer dcm4chee-arc-light: eine statische Seite hinter nginx und oauth2-proxy.
+<!-- PACS-Verwaltung fuer dcm4chee-arc-light: eine statische Seite hinter nginx (Anmeldung durch nginx: oauth2-proxy, Basic-Auth oder keine).
      Admin page for dcm4chee-arc-light. Site settings: config.js (window.PACS_ADMIN), no build step. -->
 <html lang="de">
 <head>
@@ -104,6 +104,7 @@
     <a id="l-viewer" href="/">Viewer</a>
   </nav>
   <span class="konto" id="konto"></span>
+  <a class="abmelden" id="l-abmelden" href="#" hidden>Abmelden</a>
 </header>
 <main>
   <p id="meldung" class="meldung" role="status" aria-live="polite"></p>
@@ -260,7 +261,7 @@
 // Platten, Protokoll und Firewall ueber den Dienst /admin/dienst/ (verwaltung-dienst.py, firewall.py).
 // Aussehen: admin.css (shadcn-Bauweise, OHIF-Farben).
 const K = Object.assign({ titel: 'PACS-Verwaltung', aet: 'DCM4CHEE', iocmAet: 'IOCM_QUALITY', dcm4cheeUrl: '/dcm4chee-arc/ui2/',
-  viewerUrl: '/', logo: '', locale: 'de-DE' }, window.PACS_ADMIN);
+  viewerUrl: '/', logo: '', locale: 'de-DE', kontoUrl: '/oauth2/userinfo', abmeldenUrl: '' }, window.PACS_ADMIN);
 try { Intl.getCanonicalLocales(K.locale); } catch (e) { K.locale = 'de-DE'; }   // z. B. de_AT: sonst scheitert jede Zahl
 const RS = '/dcm4chee-arc/aets/' + K.aet + '/rs';
 const KORB = '/dcm4chee-arc/aets/' + K.iocmAet + '/rs';   // Ansicht mit den abgelehnten Studien
@@ -285,7 +286,7 @@ const leer = (n, text) => '<tr><td colspan="' + n + '" class="leer">' + text + '
 document.title = K.titel;
 $('#titel').textContent = K.titel;
 if (K.logo) { $('#logo').src = K.logo; $('#logo').hidden = false; }
-[['#l-dcm4chee', K.dcm4cheeUrl], ['#l-viewer', K.viewerUrl]].forEach(([s, url]) => { $(s).href = url || '#'; $(s).hidden = !url; });
+[['#l-dcm4chee', K.dcm4cheeUrl], ['#l-viewer', K.viewerUrl], ['#l-abmelden', K.abmeldenUrl]].forEach(([s, url]) => { $(s).href = url || '#'; $(s).hidden = !url; });
 
 // Meldung unten rechts; Hinweise verschwinden nach 6 s, Fehler bleiben bis zur naechsten Meldung
 let meldungUhr = null;
@@ -296,13 +297,25 @@ function melden(text, fehler) {
   if (text && !fehler && !text.endsWith('…')) meldungUhr = setTimeout(() => (meldung.textContent = ''), 6000);
 }
 
+// Abgelaufene Sitzung: nginx antwortet mit einer Weiterleitung zur Anmeldeseite (anderer Server), fetch scheitert dann nur mit
+// "Failed to fetch". Mit redirect: 'manual' wird daraus ein erkennbarer Fall; Status 401 (z. B. Basic-Auth) zaehlt ebenso.
+// sitzungAus merkt sich, dass die Sitzung ablief, damit die Karten nicht "kein Status" oder "noch keine Aenderungen" melden;
+// es bleibt gesetzt, bis die Seite neu geladen wird (ein spaeterer Aufruf, der zufaellig noch durchkommt, hebt es nicht auf).
+const ABGELAUFEN = 'Sitzung abgelaufen, Seite neu laden (F5)';
+let sitzungAus = false;
+async function holen(pfad, o) {
+  const r = await fetch(pfad, Object.assign({ redirect: 'manual' }, o));
+  if (r.type === 'opaqueredirect' || r.status === 401) { sitzungAus = true; melden(ABGELAUFEN, true); throw new Error(ABGELAUFEN); }
+  return r;
+}
+
 // Aufruf an dcm4chee bzw. den Dienst unter /admin/dienst/ (typ application/json). Aenderungen tragen die
 // Beschreibung fuers Protokoll im Kopf X-PACS-Admin.
 async function api(methode, pfad, { body, protokoll, typ = 'application/dicom+json' } = {}) {
   const kopf = {};
   if (body) kopf['Content-Type'] = typ;
   if (protokoll) kopf['X-PACS-Admin'] = encodeURIComponent(protokoll);
-  const r = await fetch(pfad, { method: methode, headers: kopf, body: body && JSON.stringify(body), cache: 'no-store' });
+  const r = await holen(pfad, { method: methode, headers: kopf, body: body && JSON.stringify(body), cache: 'no-store' });
   const text = await r.text();
   if (!r.ok) {
     let grund = 'abgelehnt';
@@ -347,18 +360,20 @@ function zeigen() {
 }
 window.onhashchange = zeigen;
 
-fetch('/oauth2/userinfo').then(r => r.json()).then(u => ($('#konto').textContent = u.preferredUsername || u.email || '')).catch(() => {});
+// Konto im Kopf: JSON von kontoUrl (Standard oauth2-proxy /oauth2/userinfo, bei Basic-Auth liefert nginx dieselbe Form);
+// leer = kein Konto anzeigen. Jede andere Antwort (404, HTML, anderer Server) laesst das Feld leer, die Seite laeuft weiter.
+if (K.kontoUrl) fetch(K.kontoUrl).then(r => r.json()).then(u => ($('#konto').textContent = u.preferredUsername || u.email || u.user || '')).catch(() => {});
 
 // ---------------------------------------------------------------- Uebersicht
 // status.json darf Teile auslassen (z. B. ohne Plattenassistent): was fehlt, bleibt ausgeblendet. Ohne Platten
 // (fehlt oder leer) zeigt die Karte Speicher nur "keine Daten", nie "keine Platte nimmt neue Bilder an".
 async function uebersicht() {
-  const s = await fetch('/admin/daten/status.json', { cache: 'no-store' }).then(r => (r.ok ? r.json() : null)).catch(() => null);
+  const s = await holen('/admin/daten/status.json', { cache: 'no-store' }).then(r => (r.ok ? r.json() : null)).catch(() => null);
   const hat = k => { const x = s && s[k]; return !!x && (typeof x !== 'object' || Object.keys(x).length > 0); };   // [] und {} = keine Daten
   $('#karte-speicher').hidden = $('.speicher').hidden = !s;
   $('#neu-platte').hidden = !hat('neue_platten');
   $('#karte-dienste').hidden = !hat('dienste');
-  $('#stand').textContent = !s ? 'Kein Status vorhanden (dashboard-status.py läuft per cron alle 5 Minuten).'
+  $('#stand').textContent = !s ? (sitzungAus ? ABGELAUFEN : 'Kein Status vorhanden (dashboard-status.py läuft per cron alle 5 Minuten).')
     : s.stand ? 'Stand ' + new Date(s.stand).toLocaleString(K.locale) + ', neu alle 5 Minuten' : '';
   if (hat('platten')) {
     praefix = typeof s.prefix === 'string' ? s.prefix : '';
@@ -415,11 +430,12 @@ async function uebersicht() {
       (n ? 'Ansehen' : 'Öffnen') + '</a></p>';
   }).catch(e => ($('#k-fw').innerHTML = '<p class="fehler">' + esc(e.message) + '</p>'));
   // eigene Aenderungen aus dem Protokoll, neueste oben
-  const log = await fetch('/admin/dienst/protokoll?quelle=admin&letzte=15', { cache: 'no-store' }).then(r => (r.ok ? r.text() : '')).catch(() => '');
+  const log = await holen('/admin/dienst/protokoll?quelle=admin&letzte=15', { cache: 'no-store' }).then(r => (r.ok ? r.text() : '')).catch(() => '');
   const zeilen = log.split('\n').filter(Boolean).map(l => { try { return JSON.parse(l); } catch (e) { return null; } }).filter(Boolean).reverse().slice(0, 15);
+  const dekodiert = k => { try { return decodeURIComponent(k || ''); } catch (x) { return k || ''; } };
   $('#aenderungen').innerHTML = zeilen.map(e => '<tr><td>' + esc(new Date(e.t).toLocaleString(K.locale)) + '</td><td>' + esc(e.u) +
-    '</td><td class="d">' + esc(decodeURIComponent(e.k || '') || e.m + ' ' + e.uri) + '</td><td>' + (e.status < 300 ? '<span class="badge gut">erledigt</span>'
-    : '<span class="badge gefahr">HTTP ' + esc(e.status) + '</span>') + '</td></tr>').join('') || leer(4, 'Noch keine Änderungen über diese Seite.');
+    '</td><td class="d">' + esc(dekodiert(e.k) || ((e.m || '') + ' ' + (e.uri || '')).trim()) + '</td><td>' + (e.status < 300 ? '<span class="badge gut">erledigt</span>'
+    : '<span class="badge gefahr">HTTP ' + esc(e.status) + '</span>') + '</td></tr>').join('') || leer(4, sitzungAus ? ABGELAUFEN : 'Noch keine Änderungen über diese Seite.');
 }
 
 // ---------------------------------------------------------------- Studien
@@ -669,8 +685,9 @@ $('#platten').onclick = async ev => {
   }[b.dataset.a];
   if (!frage || !confirm(frage)) return;
   const text = { freigeben: 'Markierung voll entfernt', anhaengen: 'In Schreibliste aufgenommen', abhaengen: 'Aus Schreibliste genommen' }[b.dataset.a];
-  if (await ausfuehren(text + ': ' + n, () => api('POST', '/admin/dienst/' + b.dataset.a,
-    { typ: 'application/json', body: { platte: b.dataset.p }, protokoll: text + ' · ' + b.dataset.p }))) uebersicht();
+  await ausfuehren(text + ': ' + n, () => api('POST', '/admin/dienst/' + b.dataset.a,
+    { typ: 'application/json', body: { platte: b.dataset.p }, protokoll: text + ' · ' + b.dataset.p }));
+  uebersicht();   // auch nach einem Fehler: bei "Archiv nicht neu geladen" (HTTP 500) steht die Aenderung schon im LDAP
 };
 
 // ---------------------------------------------------------------- Neue Festplatte
@@ -684,7 +701,7 @@ const kopf = (titel, text) => '<div class="card-kopf"><div><h2 class="card-titel
 
 async function plattePanel(s) {
   const el = $('#neu-platte');
-  const a = await fetch('/admin/dienst/auftrag', { cache: 'no-store' }).then(r => (r.ok ? r.json() : {})).catch(() => ({}));
+  const a = await holen('/admin/dienst/auftrag', { cache: 'no-store' }).then(r => (r.ok ? r.json() : {})).catch(() => ({}));
   clearTimeout(auftragUhr);
   if (a.start && (a.laeuft || Date.now() - new Date(a.ende) < 30 * 60e3)) return auftragZeigen(el, a);
   const n = Object.assign({ kandidaten: [] }, s.neue_platten);   // nur Geraete, die pacs-storage.sh kandidaten meldet
@@ -694,7 +711,7 @@ async function plattePanel(s) {
       '<li>Sie erscheint hier innerhalb von 5 Minuten</li><li>Einrichten bestätigen, fertig</li></ol>' +
       '<div><button id="p-suchen">Jetzt suchen</button></div></div>';
     $('#p-suchen').onclick = async () => {
-      if (await ausfuehren('Nach neuen Platten suchen', () => api('GET', '/admin/dienst/platten'))) uebersicht();
+      if (await ausfuehren('Nach neuen Platten suchen', () => api('GET', '/admin/dienst/platten', { protokoll: 'Nach neuen Platten suchen' }))) uebersicht();
     };
     return;
   }
@@ -729,17 +746,21 @@ function auftragZeigen(el, a) {
   const aus = a.ausgabe || '';
   const stand = SCHRITTE.reduce((n, [marke], i) => (aus.includes(marke) ? i : n), -1);
   const ok = !a.laeuft && a.rc === 0;
+  const nichtGeladen = !a.laeuft && a.rc === 3;   // Exit 3 von pacs-storage.sh: im LDAP eingetragen, das Archiv hat die Konfiguration aber nicht neu geladen
   el.onclick = null;
   el.innerHTML = kopf('Neue Festplatte ' + esc(a.name), a.laeuft ? 'läuft seit ' + esc(zeit(a.start)) + ', gestartet von ' + esc(a.wer)
-    : ok ? 'eingerichtet ' + esc(zeit(a.ende)) : 'abgebrochen ' + esc(zeit(a.ende))) +
+    : ok ? 'eingerichtet ' + esc(zeit(a.ende)) : nichtGeladen ? 'eingerichtet ' + esc(zeit(a.ende)) + ', Archiv nicht neu geladen'
+    : 'abgebrochen ' + esc(zeit(a.ende))) +
     '<div class="card-inhalt stapel"><ol class="schritte">' + SCHRITTE.map(([, text], i) =>
       '<li class="' + (ok || i < stand ? 'erledigt' : i === stand && a.laeuft ? 'jetzt' : '') + '">' + text + '</li>').join('') + '</ol>' +
     (a.laeuft ? '' : ok ? '<p class="ok" role="status">' + esc(a.name) + ' ist eingerichtet.</p>'
+      : nichtGeladen ? '<div class="alert warn" role="status"><strong>Archiv nicht neu geladen</strong><p>' +
+        esc((aus.match(/ACHTUNG: (.*)/) || [0, 'siehe Ausgabe'])[1]) + '</p></div>'
       : '<div class="alert gefahr" role="status"><strong>Abgebrochen</strong><p>' + esc((aus.match(/HALT: .*/) || ['siehe Ausgabe'])[0]) +
-        '</p><p class="hinweis">Ausgabe unten, auch in /var/log/pacs-storage.log.</p></div>') +
+        '</p><p class="hinweis">Ausgabe unten, auch im Log von pacs-storage.sh (STORAGE_LOG).</p></div>') +
     '<details' + (ok ? '' : ' open') + '><summary>Ausgabe des Skripts</summary><pre class="ausgabe">' + esc(aus) + '</pre></details></div>';
   if (a.laeuft) auftragUhr = setTimeout(async () => {
-    const neu = await fetch('/admin/dienst/auftrag', { cache: 'no-store' }).then(r => r.json()).catch(() => a);
+    const neu = await holen('/admin/dienst/auftrag', { cache: 'no-store' }).then(r => r.json()).catch(() => a);
     if (neu.laeuft) auftragZeigen(el, neu); else uebersicht();
   }, 2000);
 }
@@ -772,9 +793,12 @@ const rechner = ip => (fw && fw.namen[ip]) || '';
 
 async function fwLaden(neu) {
   try {
-    fw = await api('GET', '/admin/dienst/firewall' + (neu ? '?neu=1' : ''));
+    fw = await api('GET', '/admin/dienst/firewall' + (neu ? '?neu=1' : ''), neu ? { protokoll: 'Firewall neu laden' } : {});
     fwZeigen();
-  } catch (e) { melden('Firewall laden: ' + e.message, true); }
+  } catch (e) {
+    melden('Firewall laden: ' + e.message, true);
+    if (neu) throw e;   // "Jetzt suchen" (ausfuehren) darf dann nicht "erledigt" melden
+  }
 }
 
 function fwAendern(fn) {
@@ -835,8 +859,10 @@ function fwZeigen() {
   k.regeln.forEach(r => ports.has(r.port) || ports.set(r.port, null));
   const g = fw.konfig.geaendert;
   $('#fw-kopf').innerHTML = '<div class="card-inhalt zeile">' +
-    (fw.wirksam ? '<span class="badge gut punkt">wirksam</span>' : '<span class="badge gefahr punkt">ausgeschaltet</span>') +
-    '<span class="info">Schnittstelle ' + esc(k.schnittstelle) + ' · Zahlen seit ' + esc(seit) +
+    (fw.wirksam ? '<span class="badge gut punkt">wirksam</span>' : '<span class="badge gefahr punkt" title="' + esc(fw.wirksam_grund || '') +
+      '">' + (k.aktiv ? 'nicht wirksam' : 'ausgeschaltet') + '</span>') +
+    '<span class="info">' + (!fw.wirksam && k.aktiv && fw.wirksam_grund ? 'Nicht wirksam: ' + esc(fw.wirksam_grund) + ' · ' : '') +
+    'Schnittstelle ' + esc(k.schnittstelle) + ' · Zahlen seit ' + esc(seit) +
     (g ? ' · zuletzt geändert ' + esc(zeit(g.zeit)) + ' von ' + esc(g.wer || '?') : '') + '</span><span style="flex:1"></span>' +
     '<label class="wahl">Ports ohne eigene Regel <select id="fw-standard">' + Object.keys(MODUS).map(m => '<option value="' + m + '"' +
       (m === std() ? ' selected' : '') + '>' + MODUS[m] + '</option>').join('') + '</select></label>' +
@@ -856,7 +882,7 @@ function fwZeigen() {
       '<td><select data-a="modus" aria-label="Zugang Port ' + port + '"><option value=""' + (r ? '' : ' selected') + '>Standard (' + MODUS[std()] + ')</option>' +
         Object.keys(MODUS).map(m => '<option value="' + m + '"' + (r && m === modus ? ' selected' : '') + '>' + MODUS[m] + '</option>').join('') + '</select>' +
         (pv && pv.ipv6 && modus !== 'offen' ? ' <span class="badge gefahr" title="Docker veröffentlicht den Port auch über IPv6. Diese Verbindungen laufen an der ' +
-          'Firewall vorbei. Port nur über IPv4 veröffentlichen (Installationsanleitung, Schritt 10).">IPv6 nicht gefiltert</span>' : '') + '</td>' +
+          'Firewall vorbei. Port nur über IPv4 veröffentlichen (docs/modules.de.md#firewall).">IPv6 nicht gefiltert</span>' : '') + '</td>' +
       '<td class="d">' + (r && modus !== 'offen' ? (r.erlaubt.length > 6 ? '<details data-port="' + port + '"' + (fwOffen.has(port) ? ' open' : '') +
         '><summary>' + r.erlaubt.length + ' Rechner und Netze</summary>' : '') +
         '<div class="chips">' + (chips || '<span class="info">' + (modus === 'gesperrt' ? 'niemand' : 'noch niemand eingetragen') + '</span>') +
@@ -1068,8 +1094,9 @@ $('#firewall').onsubmit = ev => {
       let k = '';
       try { k = decodeURIComponent(e.k || ''); } catch (x) { k = e.k || ''; }
       const [was, ...rest] = k.split(' · ');
-      const s = (e.uri.match(/\/studies\/([0-9.]+)/) || [])[1];
-      return { a: (was || e.m + ' ' + e.uri) + ' (Verwaltung)', s: /gelöscht/.test(was) ? '' : s, d: rest.join(' · ') };
+      const uri = String(e.uri || '');
+      const s = (uri.match(/\/studies\/([0-9.]+)/) || [])[1];
+      return { a: (was || ((e.m || '') + ' ' + uri).trim() || 'Änderung') + ' (Verwaltung)', s: /gelöscht/.test(was) ? '' : s, d: rest.join(' · ') };
     }
     const u = new URL(e.r, location.origin);
     const korb = u.pathname.startsWith('/dcm4chee-arc/aets/' + K.iocmAet + '/');   // Ansicht der abgelehnten Studien
@@ -1087,12 +1114,23 @@ $('#firewall').onsubmit = ev => {
     return { a: 'Suche', d: (korb ? 'abgelehnte Studien · ' : '') + d };
   }
 
+  // Eine unlesbare Zeile (z. B. r keine Adresse) bricht nicht den ganzen Reiter ab: sie wird uebersprungen und unter der
+  // Liste gezaehlt. Ohne Konto (leeres oder fehlendes u, z. B. aus einem fremden Log-Lieferanten) steht die Zeile trotzdem
+  // in der Liste, als "(ohne Konto)".
+  const OHNE_KONTO = '(ohne Konto)';
+  let unlesbar = 0;
+  function artSicher(e) {
+    try { return art(e) || {}; } catch (x) { unlesbar++; return {}; }
+  }
+
   // je Zeile ein JSON (NDJSON vom Dienst /admin/dienst/protokoll)
   async function laden(von, bis) {
-    const r = await fetch('/admin/dienst/protokoll?quelle=ereignisse,admin&von=' + von + '&bis=' + bis, { cache: 'no-store' });
+    const r = await holen('/admin/dienst/protokoll?quelle=ereignisse,admin&von=' + von + '&bis=' + bis, { cache: 'no-store' });
     if (!r.ok) throw new Error('Protokoll: HTTP ' + r.status);
     return (await r.text()).split('\n').filter(Boolean).map(l => {
-      try { return JSON.parse(l); } catch (e) { return null; }
+      try { const e = JSON.parse(l); if (e && typeof e === 'object' && !Array.isArray(e)) return e; } catch (x) { /* unten gezaehlt */ }
+      unlesbar++;
+      return null;
     }).filter(Boolean);
   }
 
@@ -1118,7 +1156,7 @@ $('#firewall').onsubmit = ev => {
   };
 
   async function qido(q) {
-    const r = await fetch(RS + '/studies?' + q + FELDER);
+    const r = await holen(RS + '/studies?' + q + FELDER);
     return r.status === 200 ? r.json() : []; // 204 = nichts gefunden
   }
 
@@ -1130,12 +1168,14 @@ $('#firewall').onsubmit = ev => {
       const ab = new Date(f.von.value + 'T00:00').getTime(), bis = new Date(f.bis.value + 'T00:00').getTime() + 864e5;
       const konto = f.konto.value.trim().toLowerCase(), pid = f.pid.value.trim();
       const pc = f.pc.value.trim().toLowerCase(), text = f.text.value.trim().toLowerCase(), name = f.name.value.trim();
-      const rechner = await fetch('/admin/daten/rechner.json').then(r => (r.ok ? r.json() : {})).catch(() => ({}));
+      const rechner = await holen('/admin/daten/rechner.json').then(r => (r.ok ? r.json() : {})).catch(() => ({}));
+      unlesbar = 0;
       let ev = (await laden(f.von.value, f.bis.value))
-        .map(e => ({ ...e, ms: Date.parse(e.t), ...art(e) }))
-        .filter(e => e.a && e.u && e.ms >= ab && e.ms < bis && (!konto || e.u.toLowerCase().includes(konto)) && passtArt(e, f.art.value) &&
+        .map(e => ({ ...e, ms: Date.parse(e.t), u: String(e.u || '').trim() || OHNE_KONTO, ...artSicher(e) }))
+        .filter(e => !Number.isNaN(e.ms) || (unlesbar++, false))
+        .filter(e => e.a && e.ms >= ab && e.ms < bis && (!konto || e.u.toLowerCase().includes(konto)) && passtArt(e, f.art.value) &&
           (!pc || ((rechner[e.ip] || '') + ' ' + (e.ip || '')).toLowerCase().includes(pc)) &&
-          (!text || [e.a, e.d, e.pid, e.s].join(' ').toLowerCase().includes(text)))
+          (!text || [e.a, e.d, e.s].join(' ').toLowerCase().includes(text)))
         .sort((x, y) => x.ms - y.ms);
       const zuletzt = {};
       ev = ev.filter(e => {
@@ -1148,7 +1188,7 @@ $('#firewall').onsubmit = ev => {
       const pat = {};
       if (pid) {
         (await qido('PatientID=' + encodeURIComponent(pid) + '&limit=1000')).forEach(s => (pat[v(s, '0020000D')] = patient(s)));
-        ev = ev.filter(e => (e.s && pat[e.s]) || (e.d && e.d.includes(pid)) || e.pid === pid);
+        ev = ev.filter(e => (e.s && pat[e.s]) || (e.d && e.d.includes(pid)));
       }
       // Patientenname: Studien dieses Namens aus dem PACS, dazu Suchen (auch Patientensuchen) und Aenderungen mit dem
       // Namen in den Details
@@ -1168,7 +1208,7 @@ $('#firewall').onsubmit = ev => {
         const p = pat[e.s] || {};
         return [new Date(e.ms).toLocaleString(K.locale), e.u, rechner[e.ip] ? rechner[e.ip] + ' (' + e.ip + ')' : e.ip,
           e.a + (e.status >= 400 ? ' (HTTP ' + e.status + ')' : ''),
-          p.name || '', p.pid || e.pid || '', p.studie || (e.s ? e.s : ''), e.d || ''];
+          p.name || '', p.pid || '', p.studie || (e.s ? e.s : ''), e.d || ''];
       });
       // Anzeige (zeilen bleiben fuer die CSV): Tage als Zwischenzeile; Wer = Konto ohne Domain, darunter der PC; Was =
       // Aktion als Badge (Verwaltung und Abgelehntes fallen auf), darunter jedes Detail in einer eigenen Zeile
@@ -1187,7 +1227,8 @@ $('#firewall').onsubmit = ev => {
           '<td><div>' + esc(name) + '</div><div class="neben mono">' + esc(nr) + '</div></td>' +
           '<td class="neben">' + esc(studie) + '</td></tr>';
       }).join('') || '<tr><td colspan="5" class="leer">Keine Einträge in diesem Zeitraum.</td></tr>';
-      info.textContent = zeilen.length + ' Einträge' + (zeilen.length === MAX ? ', nur die neuesten ' + MAX + ', Filter enger setzen' : '');
+      info.textContent = zeilen.length + ' Einträge' + (zeilen.length === MAX ? ', nur die neuesten ' + MAX + ', Filter enger setzen' : '') +
+        (unlesbar ? ', ' + unlesbar + (unlesbar === 1 ? ' unlesbare Zeile' : ' unlesbare Zeilen') + ' übersprungen' : '');
       document.getElementById('p-csv').disabled = !zeilen.length;
     } catch (e) {
       info.textContent = 'Fehler: ' + e.message;
@@ -1200,7 +1241,7 @@ $('#firewall').onsubmit = ev => {
     const zelle = x => '"' + String(x).replace(/^([=+\-@])/, "'$1").replace(/"/g, '""') + '"';
     const csv = [kopf, ...zeilen].map(z => z.map(zelle).join(';')).join('\r\n');
     const a = document.createElement('a');
-    a.href = URL.createObjectURL(new Blob(['﻿' + csv], { type: 'text/csv' }));
+    a.href = URL.createObjectURL(new Blob(['\uFEFF' + csv], { type: 'text/csv' }));
     a.download = 'pacs-protokoll-' + f.von.value + '-bis-' + f.bis.value + '.csv';
     a.click();
   };
