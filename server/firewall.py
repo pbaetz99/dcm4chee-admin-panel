@@ -80,9 +80,30 @@ STANDARD.update({DICOM[0]: "probelauf", HL7[0]: "probelauf"})
 sperre = threading.Lock()
 
 
+# Hinweis fuer Programme, die auf dem Host fehlen koennen (Debian-Pakete)
+HINWEIS = {"iptables": "apt install iptables", "iptables-restore": "apt install iptables", "ip": "apt install iproute2",
+           "docker": "Docker installieren, z. B. apt install docker.io", "journalctl": "apt install systemd"}
+
+
+LAUF_ZEIT = 120   # Sekunden; ein haengendes iptables oder docker haelt sonst den Dienst und die Sperre fuer immer fest
+
+
+def lauf(args, **kw):
+    """subprocess.run mit Text-Ausgabe und Zeitgrenze. Fehlt das Programm oder antwortet es nicht, kommt eine
+    verstaendliche Zeile (RuntimeError) statt eines Tracebacks oder eines haengenden Dienstes."""
+    kw.setdefault("timeout", LAUF_ZEIT)
+    try:
+        return subprocess.run(args, capture_output=True, encoding="utf-8", errors="replace", **kw)
+    except FileNotFoundError:
+        raise RuntimeError("%s nicht gefunden: %s (docs/modules.de.md#firewall)" % (args[0], HINWEIS.get(args[0], "installieren")))
+    except subprocess.TimeoutExpired:
+        raise RuntimeError("%s antwortet nicht (nach %d s abgebrochen)" % (args[0], kw["timeout"]))
+    except OSError as e:
+        raise RuntimeError("%s nicht ausfuehrbar: %s" % (args[0], e))
+
+
 def iptables(*args, eingabe=None):
-    r = subprocess.run(["iptables-restore", "--noflush"] if eingabe is not None else ["iptables"] + list(args),
-                       input=eingabe, capture_output=True, encoding="utf-8")
+    r = lauf(["iptables-restore", "--noflush"] if eingabe is not None else ["iptables"] + list(args), input=eingabe)
     if r.returncode:
         raise RuntimeError((r.stderr or r.stdout).strip().splitlines()[-1] if (r.stderr or r.stdout).strip() else "iptables fehlgeschlagen")
     return r.stdout
@@ -96,23 +117,35 @@ def standardroute(text):
 
 
 def schnittstelle_standard():
-    """FW_INTERFACE, sonst die Schnittstelle der Standardroute, sonst leer (dann meldet pruefen/anwenden den Fehler)."""
-    if os.environ.get("FW_INTERFACE"):
+    """FW_INTERFACE (leer gilt als nicht gesetzt), sonst die Schnittstelle der Standardroute, sonst leer (dann meldet
+    pruefen/anwenden den Fehler). Fehlt das Programm ip, kommt eine Zeile mit dem Hinweis."""
+    if os.environ.get("FW_INTERFACE", "").strip():
         return os.environ["FW_INTERFACE"].strip()
     try:
-        return standardroute(subprocess.run(["ip", "route", "show", "default"], capture_output=True, encoding="utf-8").stdout)
-    except OSError:
-        return ""
+        return standardroute(lauf(["ip", "route", "show", "default"]).stdout)
+    except RuntimeError as e:
+        raise RuntimeError("%s. Oder FW_INTERFACE in /etc/default/pacs-admin setzen" % e)
+
+
+def json_laden(pfad):
+    """JSON-Datei lesen. Ist der Inhalt kein JSON, nennt der Fehler (ValueError) die Datei."""
+    with open(pfad, encoding="utf-8") as f:
+        try:
+            return json.load(f)
+        except ValueError as e:
+            raise ValueError("%s: %s" % (pfad, e))
 
 
 # ---------------------------------------------------------------- Regeln
 def standard_regeln():
     """Regeln ohne firewall.json: FW_DEFAULT_RULES (gleiches Format wie firewall.json) oder der eingebaute Satz."""
     if STANDARD_DATEI:
-        with open(STANDARD_DATEI, encoding="utf-8") as f:
-            k, fehler = pruefen(json.load(f))
+        try:
+            k, fehler = pruefen(json_laden(STANDARD_DATEI))
+        except (OSError, ValueError) as e:   # Datei fehlt oder ist kein JSON
+            raise ValueError("FW_DEFAULT_RULES: %s" % e)
         if fehler:
-            raise ValueError("%s: %s" % (STANDARD_DATEI, " · ".join(fehler)))
+            raise ValueError("FW_DEFAULT_RULES %s: %s" % (STANDARD_DATEI, " · ".join(fehler)))
         return k
     return {"aktiv": True, "standard": "offen", "regeln": [
         {"port": p, "name": PORTNAMEN.get(p, ""), "modus": m, "protokollieren": False, "erlaubt": []}
@@ -121,8 +154,11 @@ def standard_regeln():
 
 def laden():
     try:
-        with open(KONFIG, encoding="utf-8") as f:
-            k = json.load(f)
+        k = json_laden(KONFIG)
+        regeln = k.get("regeln", []) if isinstance(k, dict) else None
+        if not isinstance(regeln, list) or not all(isinstance(r, dict) for r in regeln):
+            raise ValueError("%s: kein JSON-Objekt mit einer Liste regeln" % KONFIG)
+        k = dict({"aktiv": True, "regeln": []}, **k)
     except FileNotFoundError:
         k = standard_regeln()
     if not k.get("schnittstelle"):
@@ -132,9 +168,10 @@ def laden():
 
 def schreiben(k, pfad=KONFIG):
     tmp = pfad + ".neu"
-    with open(tmp, "w", encoding="utf-8") as f:
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o640)
+    with os.fdopen(fd, "w", encoding="utf-8") as f:
+        os.fchmod(fd, 0o640)   # vor dem ersten Byte: eine liegengebliebene .neu behaelt sonst ihren alten Modus
         json.dump(k, f, ensure_ascii=False, indent=1)
-    os.chmod(tmp, 0o640)
     os.replace(tmp, pfad)
 
 
@@ -263,14 +300,20 @@ def anwenden(k):
     schreiben({"zeit": time.strftime("%Y-%m-%dT%H:%M:%S"), "ports": ports}, ABLAGE + "angewendet.json")
 
 
+def angewendet():
+    """Was beim letzten Anwenden galt ({"zeit", "ports"}); leer, wenn unbekannt."""
+    try:
+        return json_laden(ABLAGE + "angewendet.json")
+    except (OSError, ValueError):
+        return {}
+
+
 def nachziehen():
     """Alle 5 Minuten (pacs-verwaltung): neue oder weggefallene Docker-Ports -> Regeln neu, damit der Standard
     auch fuer neue Ports mit ihrem Port im Log greift."""
     with sperre:
-        try:
-            vorher = json.load(open(ABLAGE + "angewendet.json")).get("ports", [])
-        except (OSError, ValueError):
-            vorher = None
+        a = angewendet()
+        vorher = a.get("ports", []) if a else None
         k = laden()
         if k.get("standard", "offen") != "offen" and vorher != [v["port"] for v in veroeffentlicht()]:
             anwenden(k)
@@ -360,8 +403,7 @@ def ports_lesen(text):
 
 def veroeffentlicht():
     """Von aussen erreichbare Docker-Ports, siehe ports_lesen"""
-    r = subprocess.run(["docker", "ps", "--format", "{{.Names}}\t{{.Ports}}"], capture_output=True, encoding="utf-8")
-    return ports_lesen(r.stdout)
+    return ports_lesen(lauf(["docker", "ps", "--format", "{{.Names}}\t{{.Ports}}"]).stdout)
 
 
 def versuche(tage=7, pub=(), text=None):
@@ -369,8 +411,7 @@ def versuche(tage=7, pub=(), text=None):
     Die Sammelregel (pacs-standard 0) kennt nur den Port im Container (DPT=): port = der Host-Port, der als einziger
     dorthin fuehrt (pub: veroeffentlicht()), sonst 0 und ziel = Port im Container. text: Log statt journalctl (Test)."""
     if text is None:
-        text = subprocess.run(["journalctl", "-k", "--since", "%d days ago" % tage, "-o", "short-iso", "--no-pager"],
-                              capture_output=True, encoding="utf-8", errors="replace").stdout
+        text = lauf(["journalctl", "-k", "--since", "%d days ago" % tage, "-o", "short-iso", "--no-pager"]).stdout
     v = {}
     for zeile in text.splitlines():
         m = re.match(r"(\S+) \S+ kernel: .*?pacs-(sperre|probe|erlaubt|standard) (\d+): .*?SRC=([0-9.]+)", zeile)
@@ -405,16 +446,26 @@ def namen(ips):
     return {ip: _dns[ip][0] for ip in set(ips) if ip in _dns and _dns[ip][0]}
 
 
+def wirkung(k, spruenge_liste):
+    """Warum die Regeln nicht wirken (Text), sonst leer. spruenge_liste: Zeilen von spruenge()."""
+    soll = "-A DOCKER-USER -i %s -j %s" % (k.get("schnittstelle"), KETTE)
+    if soll in spruenge_liste:
+        return ""
+    if not k.get("aktiv", True):
+        return "in /admin/ (Reiter Firewall) ausgeschaltet"
+    if spruenge_liste:
+        return "der Sprung nach %s gilt fuer eine andere Schnittstelle als %s (firewall.py start)" % (KETTE, k.get("schnittstelle"))
+    return "kein Sprung von DOCKER-USER nach %s, die Regeln sind nicht angewendet (systemctl status pacs-firewall)" % KETTE
+
+
 def status():
     k = laden()
     try:
-        aktiv = any(z == "-A DOCKER-USER -i %s -j %s" % (k.get("schnittstelle"), KETTE) for z in spruenge())
-    except RuntimeError:
-        aktiv = False
-    try:
-        seit = json.load(open(ABLAGE + "angewendet.json")).get("zeit", "")
-    except (OSError, ValueError):
-        seit = ""
+        grund = wirkung(k, spruenge())
+    except RuntimeError as e:   # iptables fehlt oder ist nicht erlaubt (z. B. nicht als root): der Grund steht im Ergebnis
+        grund = str(e) + (" (die Kette DOCKER-USER legt Docker beim Start an: laeuft Docker?)"
+                          if "No chain" in str(e) or "Operation not supported" in str(e) else "")
+    seit = angewendet().get("zeit", "")
     a = absender_lesen()
     pub = veroeffentlicht()
     v = versuche(pub=pub)
@@ -423,7 +474,7 @@ def status():
     innen = intern()
     ips = [e["quelle"] for r in k.get("regeln", []) for e in r.get("erlaubt", []) if "/" not in e["quelle"]]
     ips += [x["quelle"] for x in v] + [x["ip"] for teil in ("dicom", "hl7", "ohne_ae") for x in a.get(teil, {}).values()]
-    return {"konfig": k, "wirksam": aktiv, "zaehler_seit": seit, "zaehler": zaehler(), "veroeffentlicht": pub,
+    return {"konfig": k, "wirksam": not grund, "wirksam_grund": grund, "zaehler_seit": seit, "zaehler": zaehler(), "veroeffentlicht": pub,
             "versuche": v, "absender": {t: sorted(a.get(t, {}).values(), key=lambda x: x["zuletzt"], reverse=True)
                                         for t in ("dicom", "hl7", "ohne_ae")},
             "absender_stand": a.get("stand", ""), "clients": c, "intern": innen,
@@ -432,11 +483,14 @@ def status():
 
 
 def intern():
-    """Netze, deren Verkehr die Firewall nie sieht: Docker, der Server selbst, loopback."""
-    r = subprocess.run("docker network inspect -f '{{range .IPAM.Config}}{{.Subnet}} {{end}}' $(docker network ls -q); hostname -I",
-                       shell=True, capture_output=True, encoding="utf-8")
+    """Netze, deren Verkehr die Firewall nie sieht: Docker, der Server selbst, loopback. Ohne Shell und mit Zeitgrenze (lauf);
+    fehlt docker oder hostname, kommt die Zeile von lauf als RuntimeError."""
+    ids = lauf(["docker", "network", "ls", "-q"]).stdout.split()
+    text = lauf(["hostname", "-I"]).stdout
+    if ids:
+        text += " " + lauf(["docker", "network", "inspect", "-f", "{{range .IPAM.Config}}{{.Subnet}} {{end}}"] + ids).stdout
     netze = {"127.0.0.0/8"}
-    for x in r.stdout.split():
+    for x in text.split():
         try:
             netze.add(str(ipaddress.IPv4Network(x, strict=False)))
         except ValueError:
@@ -487,7 +541,7 @@ def vorschlaege(k, a, v, pcs, innen=()):
 
 # ---------------------------------------------------------------- Client-PCs per DNS
 def client_namen(muster=None):
-    """Namen aus FW_CLIENT_NAMES: Muster durch Komma getrennt, Bereiche wie in bash, z. B. PC{001..250},WS{0001..0400}.
+    """Namen aus FW_CLIENT_NAMES: Muster durch Komma getrennt, Bereiche wie in bash, z. B. pc{01..20},ws{001..040}.
     Hat eine Grenze eine fuehrende Null, wird auf die Breite der Grenzen aufgefuellt. Leer = keine Namen."""
     namen = []
     for m in (CLIENT_MUSTER if muster is None else muster).split(","):
@@ -574,7 +628,7 @@ def lauschports(ziel=None):
     if ziel is None:
         try:
             ziel = {v["port"]: v["ziel"] for v in veroeffentlicht()}
-        except OSError:   # ohne docker: gleiche Nummern
+        except (OSError, RuntimeError):   # ohne docker: gleiche Nummern
             ziel = {}
     return [set(p) | {ziel[x] for x in p if x in ziel} for p in (DICOM, HL7)]
 
@@ -641,7 +695,11 @@ def absender_sammeln():
     with sperre:
         a = absender_lesen()
         pfad = LOGS + "server.log"
-        st = os.stat(pfad)
+        try:
+            st = os.stat(pfad)
+        except OSError as e:
+            raise RuntimeError("%s: %s. ARC_LOG_DIR in /etc/default/pacs-admin auf das Log-Verzeichnis von wildfly setzen "
+                               "(docker inspect arc: der Mount von /opt/wildfly/standalone, darin log/)" % (pfad, e.strerror))
         datei = a.get("datei", {})
         if datei and datei.get("inode") != st.st_ino:
             alt = glob.glob(LOGS + "server.log." + datei.get("datum", "") + "*")
@@ -675,7 +733,8 @@ def nachholen():
 
 
 def selbsttest():
-    os.environ.setdefault("FW_INTERFACE", "eth0")   # Regeln ohne "schnittstelle", unabhaengig von der Route hier
+    if not os.environ.get("FW_INTERFACE", "").strip():   # auch leer gesetzt (FW_INTERFACE= in /etc/default/pacs-admin)
+        os.environ["FW_INTERFACE"] = "eth0"   # Regeln ohne "schnittstelle", unabhaengig von der Route hier
     W, D, H = WEB[0], DICOM[0], HL7[0]   # Dienstports wie eingestellt (Vorgabe 443, 11112, 2575)
     X, Y, Z = [p for p in [8080, 5601] + list(range(65001, 65536)) if p not in WEB + DICOM + HL7][:3]   # sonstige Ports
     k, f = pruefen({"regeln": [{"port": 8080, "modus": "gesperrt", "erlaubt": [{"quelle": "10.1.2.3/24"}, {"quelle": "x"}]}]})
@@ -785,22 +844,96 @@ def selbsttest():
     next(r for r in k["regeln"] if r["port"] == D)["erlaubt"].append({"quelle": "10.2.2.0/24"})
     vs = vorschlaege(k, a, v, pcs, ["172.18.0.0/16"])
     assert [x["quelle"] for x in vs] == ["10.5.5.5", "10.3.3.3"], vs
+    fehlertest()
     print("Selbsttest ok")
 
 
-if __name__ == "__main__":
-    was = sys.argv[1] if len(sys.argv) > 1 else "status"
-    if was == "test":
-        selbsttest()
-    elif was == "start":
+def fehlertest():
+    """Fehlende Programme, leere Umgebungswerte, kaputtes JSON: eine verstaendliche Meldung, kein Traceback."""
+    import tempfile
+    # fehlendes Programm: Name und Hinweis; ohne ip und ohne FW_INTERFACE nennt die Meldung beides
+    try:
+        lauf(["pacs-gibt-es-nicht"])
+        raise AssertionError("fehlendes Programm nicht gemeldet")
+    except RuntimeError as e:
+        assert "pacs-gibt-es-nicht nicht gefunden" in str(e), e
+    # haengender Aufruf: nach der Zeitgrenze eine Zeile statt eines Dienstes, der fuer immer wartet
+    try:
+        lauf([sys.executable, "-c", "import time; time.sleep(30)"], timeout=1)
+        raise AssertionError("haengender Aufruf nicht abgebrochen")
+    except RuntimeError as e:
+        assert "antwortet nicht (nach 1 s abgebrochen)" in str(e), e
+    alt = {n: os.environ.get(n) for n in ("PATH", "FW_INTERFACE")}
+    try:
+        os.environ["PATH"] = os.path.join(tempfile.gettempdir(), "pacs-ohne-programme")
+        os.environ["FW_INTERFACE"] = " eth7 "
+        assert schnittstelle_standard() == "eth7"   # Leerzeichen weg, ip wird nicht gebraucht
+        os.environ["FW_INTERFACE"] = " "
+        try:
+            schnittstelle_standard()
+            raise AssertionError("fehlendes ip nicht gemeldet")
+        except RuntimeError as e:
+            assert "ip nicht gefunden: apt install iproute2" in str(e) and "FW_INTERFACE" in str(e), e
+        try:
+            iptables("-S")
+            raise AssertionError("fehlendes iptables nicht gemeldet")
+        except RuntimeError as e:
+            assert "iptables nicht gefunden: apt install iptables" in str(e), e
+    finally:
+        for n, w in alt.items():
+            if w is None:
+                os.environ.pop(n, None)
+            else:
+                os.environ[n] = w
+    # kaputtes JSON in firewall.json und in FW_DEFAULT_RULES: die Meldung nennt die Datei
+    d = tempfile.mkdtemp()
+    g = globals()
+    alt = {n: g[n] for n in ("KONFIG", "STANDARD_DATEI")}
+    try:
+        g["KONFIG"], g["STANDARD_DATEI"] = d + "/firewall.json", d + "/standard.json"
+        for inhalt in ("{kaputt", "[]", '{"regeln": 5}', '{"regeln": [1]}'):   # JSON kaputt, keine Liste, Regel ohne Objekt
+            with open(g["KONFIG"], "w") as f:
+                f.write(inhalt)
+            try:
+                laden()
+                raise AssertionError("kaputte firewall.json angenommen: " + inhalt)
+            except ValueError as e:
+                assert g["KONFIG"] in str(e), e
+        os.remove(g["KONFIG"])   # ohne firewall.json gilt FW_DEFAULT_RULES
+        for inhalt in ("{kaputt", "{}", None):   # None: Datei fehlt
+            if inhalt is None:
+                os.remove(g["STANDARD_DATEI"])
+            else:
+                with open(g["STANDARD_DATEI"], "w") as f:
+                    f.write(inhalt)
+            try:
+                laden()
+                raise AssertionError("kaputte FW_DEFAULT_RULES angenommen: %s" % inhalt)
+            except ValueError as e:
+                assert "FW_DEFAULT_RULES" in str(e) and g["STANDARD_DATEI"] in str(e), e
+    finally:
+        g.update(alt)
+        for p in os.listdir(d):
+            os.unlink(os.path.join(d, p))
+        os.rmdir(d)
+    # warum die Regeln nicht wirken
+    k = {"aktiv": True, "schnittstelle": "eth0"}
+    assert wirkung(k, ["-A DOCKER-USER -i eth0 -j " + KETTE]) == ""
+    assert "andere Schnittstelle" in wirkung(k, ["-A DOCKER-USER -i eth1 -j " + KETTE])
+    assert "kein Sprung" in wirkung(k, []) and "ausgeschaltet" in wirkung(dict(k, aktiv=False), [])
+
+
+def befehl(was):
+    if was == "start":
         # beim Booten kommt die Standardroute evtl. erst nach Docker: bis 60 s auf die Schnittstelle warten
         for _ in range(30):
             try:
                 k = laden()
                 if k.get("schnittstelle") or not k.get("aktiv", True):
                     break
-            except ValueError:   # FW_DEFAULT_RULES ohne "schnittstelle" meldet die fehlende Route als Fehler
-                pass
+            except ValueError as e:   # FW_DEFAULT_RULES ohne "schnittstelle" meldet die fehlende Route als Fehler: warten
+                if "Schnittstelle" not in str(e):
+                    raise   # sonst ist die Datei kaputt, Warten hilft nicht
             time.sleep(2)
         anwenden(laden())
         print("Firewall %s, %d Regeln" % ("wirksam" if laden()["aktiv"] else "aus (Regeln geladen)", len(laden()["regeln"])))
@@ -822,6 +955,19 @@ if __name__ == "__main__":
             print("%5d %-10s %-28s erlaubt: %s  fremd: %s" % (r["port"], r["modus"], r["name"][:28],
                   ", ".join("%s (%d)" % (e["quelle"], zl.get("verb", {}).get(e["quelle"], 0)) for e in r["erlaubt"]) or "-", zl.get("fremd", 0)))
         print("Schnittstelle:", s["konfig"]["schnittstelle"] or "-", " wirksam:", s["wirksam"], " Zähler seit:", s["zaehler_seit"])
+        if s["wirksam_grund"]:
+            print("Nicht wirksam, weil:", s["wirksam_grund"])
+
+
+if __name__ == "__main__":
+    was = sys.argv[1] if len(sys.argv) > 1 else "status"
+    if was == "test":
+        selbsttest()
+    elif was in ("start", "stop", "status", "absender", "nachholen", "clients"):
+        try:
+            befehl(was)
+        except (RuntimeError, ValueError, OSError) as e:   # Programm fehlt, JSON kaputt, Datei fehlt: eine Zeile statt Traceback
+            sys.exit("firewall.py %s: %s" % (was, e))
     else:
         print("firewall.py start | stop | status | absender | nachholen | clients | test")
         sys.exit(1)

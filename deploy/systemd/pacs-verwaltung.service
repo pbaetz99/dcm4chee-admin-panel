@@ -1,13 +1,28 @@
-# Hilfsdienst fuer /admin/ (server/verwaltung-dienst.py): Platten-Assistent, Firewall, Protokoll-Datenbank.
-# Helper service for the admin panel. Listens only on the unix sockets PACS_SOCKET and PACS_LOG_SOCKET.
-# Erwartet das Repo unter /opt/pacs-admin (sonst die Pfade in ExecStart anpassen). Einstellungen in
-# /etc/default/pacs-admin (Beispiel deploy/pacs-admin.env.example), ohne die Datei gelten die Standardwerte.
-# Einrichten: cp deploy/systemd/pacs-verwaltung.service /etc/systemd/system/ && systemctl enable --now pacs-verwaltung
-# Das Socket-Verzeichnis (Standard /run/pacs-admin) muss in den nginx-Container gemountet sein. Der Dienst legt es
-# selbst an; die Sockets gehoeren PACS_SOCKET_UID (Standard 101 = nginx im offiziellen nginx-Image), Rechte 0600.
-# Kein RuntimeDirectory=: systemd wuerde das Verzeichnis beim Stoppen loeschen und der Mount im Container ginge ins Leere.
+# Helper service for /admin/ (server/verwaltung-dienst.py): disk assistant, firewall and the encrypted audit-log database.
+# Deutsch: docs/install.de.md#helper-service
+# Listens only on two unix sockets (PACS_SOCKET and PACS_LOG_SOCKET, default directory /run/pacs-admin); nginx reaches them
+# through a volume mount. Settings come from /etc/default/pacs-admin (example: deploy/pacs-admin.env.example); without the
+# file the defaults apply.
+#
+# Install:  cp /opt/pacs-admin/deploy/systemd/pacs-verwaltung.service /etc/systemd/system/ && systemctl enable --now pacs-verwaltung
+# Check:    sleep 1; ls -l /run/pacs-admin/     (two sockets owned by uid 101 appear a moment after the start)
+#           journalctl -u pacs-verwaltung -n 20 --no-pager     (read this if the directory is empty)
+#
+# Do not start verwaltung-dienst.py by hand while this unit runs: the second instance refuses to start with "laeuft schon"
+# (the running one keeps its sockets). For a test run by hand stop the unit first: systemctl stop pacs-verwaltung
+#
+# Paths: the unit expects the repository in /opt/pacs-admin and Python in /usr/bin/python3. Check the second one with
+#   command -v python3        (must print /usr/bin/python3; a Python in /usr/local/bin ends in "status=203/EXEC")
+# Repository somewhere else, for example /srv/pacs-admin? Run this once after the cp (also changes pacs-firewall.service
+# and the cron file) and mount the same directory in the nginx compose file:
+#   sed -i 's|/opt/pacs-admin|/srv/pacs-admin|g' /etc/systemd/system/pacs-*.service /etc/cron.d/pacs-dashboard && systemctl daemon-reload
+#
+# The socket directory must be mounted into the nginx container. The service creates it itself; the sockets belong to
+# PACS_SOCKET_UID (default 101 = nginx in the official nginx and OHIF images), mode 0600.
+# No RuntimeDirectory= on purpose: systemd would delete the directory on every stop and the container mount would point
+# to nothing.
 [Unit]
-Description=PACS-Verwaltung: Hilfsdienst fuer /admin/ (Unix-Sockets, siehe verwaltung-dienst.py)
+Description=PACS admin: helper service for /admin/ (unix sockets, see verwaltung-dienst.py)
 After=docker.service
 
 [Service]
