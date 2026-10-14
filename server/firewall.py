@@ -262,6 +262,7 @@ def regelsatz(k, ports=()):
             z.append("-A %s %s -j REJECT --reject-with tcp-reset" % (KETTE, m))
         else:
             z.append('-A %s %s %s %s -j LOG --log-prefix "pacs-probe %d: "' % (KETTE, m, neu, grenze, p))
+            z.append("-A %s %s -j RETURN" % (KETTE, m))   # sonst finge die Sammelregel unten auch Probelauf-Ports ab
     # Ports ohne Regel: Standard. Bekannte mit ihrem Port, danach alle anderen (auch kuenftig veroeffentlichte, bis zum
     # naechsten Anwenden, im Log steht dann der Port im Container als DPT=)
     if k.get("standard", "offen") != "offen":
@@ -761,6 +762,28 @@ def selbsttest():
     assert any("ausgesperrt" in x for x in f), f
     k, f = pruefen({"standard": "probelauf", "regeln": []}, client="10.1.1.1")
     assert not f and "REJECT" not in regelsatz(k, [443]) and "pacs-standard 443" in regelsatz(k, [443]), f
+
+    def urteil(rs, quelle, port):   # erste Regel mit Ziel RETURN oder REJECT entscheidet, LOG und Zaehler nicht
+        for z in rs.splitlines():
+            t = z.split()
+            wert = lambda name: t[t.index(name) + 1] if name in t else None
+            if not z.startswith("-A ") or "RELATED,ESTABLISHED" in t or wert("-p") not in (None, "tcp"):
+                continue
+            if wert("--ctorigdstport") not in (None, str(port)) or \
+                    (wert("-s") and ipaddress.IPv4Address(quelle) not in ipaddress.IPv4Network(wert("-s"))):
+                continue
+            if wert("-j") in ("RETURN", "REJECT"):
+                return wert("-j")
+        return "RETURN"   # Ende der Kette: weiter in DOCKER-USER
+    # Regelsatz und zugelassen() sagen dasselbe, in jeder Mischung aus Standard und Modus (Probelauf laesst alle durch)
+    for std in MODI:
+        for modus in MODI:
+            k, f = pruefen({"standard": std, "regeln": [{"port": X, "modus": modus, "erlaubt": [{"quelle": "10.1.1.0/24"}]}]})
+            rs = regelsatz(k, [X, Y])
+            for quelle in ("10.1.1.7", "10.9.9.9"):
+                for port in (X, Y):
+                    soll = "RETURN" if zugelassen(k, port, ipaddress.IPv4Address(quelle)) else "REJECT"
+                    assert urteil(rs, quelle, port) == soll, (std, modus, quelle, port, soll)
     # Schnittstelle: aus der Standardroute, ungueltige abgewiesen
     assert standardroute("default via 192.0.2.1 dev ens192 proto static metric 100\n") == "ens192"
     assert standardroute("192.0.2.0/24 dev eth1 proto kernel scope link\ndefault dev wg0 scope link\n") == "wg0"
