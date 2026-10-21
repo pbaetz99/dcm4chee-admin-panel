@@ -1,8 +1,15 @@
-# Zahlen fuer die Uebersicht in /admin/ (status.json) alle 5 Minuten, siehe /opt/pacs-admin/server/dashboard-status.py.
-# Writes the overview numbers every 5 minutes. Install: cp deploy/cron/pacs-dashboard /etc/cron.d/pacs-dashboard
-# Liest dieselben Einstellungen wie die systemd-Units (/etc/default/pacs-admin, als Shell-Datei eingelesen).
-# PATH mit sbin: pacs-storage.sh braucht blockdev, wipefs, blkid usw.
+# Overview numbers for /admin/ (status.json), refreshed every 5 minutes by /opt/pacs-admin/server/dashboard-status.py.
+# Deutsch: docs/install.de.md
+# Install:  cp /opt/pacs-admin/deploy/cron/pacs-dashboard /etc/cron.d/pacs-dashboard      (needs the package cron:
+#           systemctl is-active cron; /etc/cron.d exists even without cron, so a copy alone proves nothing)
+# Check:    wait for the next 5-minute mark, then  ls -l --time-style=full-iso /var/lib/pacs-admin/status/status.json
+# Reads the same settings as the systemd units (/etc/default/pacs-admin, read as a shell file). Everything the command
+# prints to stderr, including a syntax error in that file, goes to /var/log/pacs-dashboard.log: look there first.
+# The file stays empty while all is well. A failing "pacs-storage.sh kandidaten" adds one line per run (every 5 minutes)
+# until it is fixed; the page shows "Schreibliste nicht lesbar" meanwhile.
+# The PATH includes sbin because pacs-storage.sh needs blockdev, wipefs, blkid and more.
+# Repository somewhere else than /opt/pacs-admin: see the sed command in deploy/systemd/pacs-verwaltung.service.
 SHELL=/bin/sh
 PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 MAILTO=""
-*/5 * * * * root set -a; [ ! -r /etc/default/pacs-admin ] || . /etc/default/pacs-admin; set +a; python3 /opt/pacs-admin/server/dashboard-status.py >/dev/null 2>>/var/log/pacs-dashboard.log
+*/5 * * * * root { set -a; [ ! -r /etc/default/pacs-admin ] || . /etc/default/pacs-admin; set +a; python3 /opt/pacs-admin/server/dashboard-status.py >/dev/null; } 2>>/var/log/pacs-dashboard.log

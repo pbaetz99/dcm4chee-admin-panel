@@ -1,0 +1,84 @@
+# Docker Compose file for the PACS admin panel with the OHIF viewer and nginx basic auth as the login (no OAuth proxy).
+# Deutsch: docs/login.de.md#login-basic
+#
+# What it is: one container next to your dcm4chee project, in its Docker network (external, last block), so that nginx
+# reaches the container arc by name. ohif is nginx in the OHIF image: viewer, admin panel (/admin/), the calls to arc and to
+# the helper service with their locks, and the audit log. The login is HTTP basic auth done by nginx itself: no OAuth proxy,
+# no identity provider. Two lists of accounts: all accounts (viewer) and administrators (also /admin/). Limits: no sign-out,
+# no second factor, no limit on wrong passwords (docs/login.md#login-basic).
+# Admin panel without the viewer: docker-compose.adminonly.example.yml.
+#
+# Copy:   cp /opt/pacs-admin/deploy/compose/docker-compose.basic.example.yml /opt/ohif/docker-compose.yml
+# Start:  cd /opt/ohif && docker compose up -d       Check: docker compose ps, docker logs ohif
+#
+# The folder of this file is /opt/ohif. Before the first start it must hold the items below. For a missing item Docker makes
+# an empty folder owned by root and the service behind it does not work (preflight.sh --dir /opt/ohif finds that).
+#   nginx/            the nginx files built from deploy/nginx (deploy/nginx/README.md) with login basic, viewer ohif and
+#                     listener tls; mounted as /etc/nginx/conf.d
+#   tls/              server.crt (full chain, server certificate first) and server.key (docs/install.md#tls-certificate)
+#   htpasswd/         the files users (all accounts) and admins (administrators). Make them with
+#                       bash /opt/pacs-admin/deploy/tools/pacs-adduser.sh admin NAME      (also /admin/)
+#                       bash /opt/pacs-admin/deploy/tools/pacs-adduser.sh all NAME        (viewer only)
+#                     run as root: the files get owner 101 and mode 600, which the nginx workers need. nginx reads them at
+#                     every request, so a new account works at once. Without the files nobody gets in: nginx asks for a
+#                     password and answers 403 once one is typed (docs/troubleshooting.md#htpasswd-403-500).
+#   app-config.js     OHIF configuration: cp /opt/pacs-admin/deploy/app-config.js.example /opt/ohif/app-config.js
+# Outside it: the repository in /opt/pacs-admin (the admin page), /var/lib/pacs-admin/status (written by the cron job) and
+# /run/pacs-admin (the sockets of the helper service, docs/install.md#helper-service); all three are mounted below.
+#
+# Values to change are the lines with the marker comment. List them with
+#   grep -n 'CHANGE-M[E]' /opt/ohif/docker-compose.yml        (the brackets keep this header out of the result)
+# Replace the value and delete the marker comment; then the same command prints nothing. One line: the name of the Docker
+# network of dcm4chee (last block; every compose file of this folder has it).
+#
+# TLS key: nginx reads certificate and key when it starts, and in the OHIF image the nginx master runs as uid 101
+# (check: docker exec ohif id). So the key must be readable by uid 101:
+#   chown root:101 /opt/ohif/tls/server.key && chmod 640 /opt/ohif/tls/server.key
+# root:root with mode 600 stops nginx with "cannot load certificate key". A host account with uid or gid 101 can then read
+# the key too (getent passwd 101 and getent group 101 show whether 101 is taken). The folder tls/ must stay readable (755).
+#
+# Ports: host 80 -> container 8080 (only redirects to https), host 443 -> container 8443. Written as 0.0.0.0 (IPv4 only) on
+# purpose: over IPv6 docker-proxy accepts the connection, then nginx sees only the Docker gateway as client address (audit
+# log, check against locking yourself out) and the firewall of the admin panel, which is IPv4 only, does not filter it.
+# No healthcheck on purpose: nginx writes every request to the audit log, a probe on / would fill it.
+
+services:
+
+  # nginx in the OHIF image: viewer, /admin/, proxy to dcm4chee-arc with the locks, audit log, basic auth.
+  ohif:
+    image: ohif/app:v3.14.0-beta.37   # fixed version: "latest" and "latest-beta" move on. The nginx in it must be 1.25.1+
+    container_name: ohif
+    restart: unless-stopped
+    # start nginx directly: the start script of the image would write a default.conf and repack app-config.js
+    entrypoint: ["/docker-entrypoint.sh"]
+    command: ["nginx", "-g", "daemon off;"]
+    ports:
+      - "0.0.0.0:80:8080"
+      - "0.0.0.0:443:8443"
+    volumes:
+      # folders, not single files: a replaced single file would keep its old content inside the container
+      - ./nginx:/etc/nginx/conf.d:ro
+      - ./tls:/etc/nginx/tls:ro
+      - ./htpasswd:/etc/nginx/htpasswd:ro
+      # OHIF configuration (data source: the archive behind this nginx). A single file: after an edit, docker compose restart
+      - ./app-config.js:/usr/share/nginx/html/app-config.js:ro
+      # the admin page. /opt/pacs-admin is where the repository was cloned
+      - /opt/pacs-admin/web/admin:/srv/pacs-admin/admin:ro
+      # status.json of dashboard-status.py (cron), served as /admin/daten/
+      - /var/lib/pacs-admin/status:/srv/pacs-admin/status:ro
+      # sockets of the helper service (verwaltung.sock, protokoll.sock); read only is enough for sockets. The folder must
+      # stay: if it is deleted and created again, the container sees the new one only after a restart
+      - /run/pacs-admin:/run/pacs-admin:ro
+      - /etc/localtime:/etc/localtime:ro   # local time in the audit log
+      # optional: title, AE titles, links, logo and locale of the admin page without changing the repository
+      # (copy web/admin/config.js to /opt/ohif/config.js, edit it, delete the "# " in front of the next line)
+      # - ./config.js:/srv/pacs-admin/admin/config.js:ro
+      # optional: logo from the same address (config.js: logo: '/pacs-logo.svg'); /admin/ sends Cross-Origin-Embedder-Policy
+      # require-corp, a logo from another server does not load
+      # - ./logo.svg:/usr/share/nginx/html/pacs-logo.svg:ro
+
+# The Docker network of your dcm4chee project: the container arc lives there, and the service of this file joins it.
+networks:
+  default:
+    name: dcm4chee-arc_default   # CHANGE-ME: name of that network (docker network ls; preflight.sh prints it)
+    external: true

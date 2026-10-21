@@ -1,0 +1,83 @@
+// OHIF viewer configuration for a dcm4chee-arc PACS behind the nginx of this repository.
+// Deutsch: docs/install.de.md#viewer-config
+//
+// Use: copy to /opt/ohif/app-config.js (next to your compose file). The compose file mounts it over
+// /usr/share/nginx/html/app-config.js of the OHIF image, and nginx serves it at /app-config.js. Without this file the viewer
+// runs with the default configuration of the OHIF image, which knows nothing about your archive.
+// Check: open https://pacs.example.org/app-config.js in the browser (no cache): it must show this text, not an OHIF default.
+//
+// How it works: the viewer talks DICOMweb to the same address it was loaded from; nginx forwards /dcm4chee-arc/ to arc. So
+// there is no host name in this file and no CORS problem, and the same file works for https, plain http and an SSH tunnel.
+// Logging in is done by nginx (oauth2-proxy or basic auth); OHIF itself knows nothing about it.
+//
+// WHAT YOU MAY HAVE TO CHANGE
+//   - The AE title DCM4CHEE, but only if your archive uses another one (dcm4chee default: DCM4CHEE). It appears here in
+//     "arc" below and must be the same everywhere: aet in config.js, ARC_AET in /etc/default/pacs-admin and the nginx
+//     files. Do not edit them one by one: bash /opt/pacs-admin/deploy/tools/set-aet.sh NEW-AET changes the nginx files,
+//     this file and config.js.
+//   - name and friendlyName: the label of the data source, free text.
+//   - Optional tuning: maxNumberOfWebWorkers (CPU cores for image decoding), maxNumRequests (parallel image requests).
+// WHAT YOU SHOULD NOT CHANGE
+//   - The addresses built from window.location: they make the file independent of the host name.
+//   - supportsReject: false and dicomUploadEnabled: false. Rejecting and deleting studies is done in the admin panel, and
+//     nginx blocks writing requests from the viewer anyway.
+//   - The bulkDataURI block (explained there). The other data source flags describe what dcm4chee supports.
+const origin = window.location.origin;
+const arc = origin + '/dcm4chee-arc/aets/DCM4CHEE';   // the AE title of your archive
+
+/** @type {AppTypes.Config} */
+window.config = {
+  name: 'PACS',
+  routerBasename: null,
+  extensions: [],
+  modes: [],
+  showStudyList: true,
+  maxNumberOfWebWorkers: 3,
+  showWarningMessageForCrossOrigin: true,
+  showCPUFallbackMessage: true,
+  showLoadingIndicator: true,
+  strictZSpacingForVolumeViewport: true,
+  groupEnabledModesFirst: true,
+  maxNumRequests: {
+    interaction: 100,
+    thumbnail: 5,
+    prefetch: 25,
+  },
+  defaultDataSourceName: 'pacs',
+  dataSources: [
+    {
+      namespace: '@ohif/extension-default.dataSourcesModule.dicomweb',
+      sourceName: 'pacs',
+      configuration: {
+        friendlyName: 'PACS',
+        name: 'DCM4CHEE',
+        wadoUriRoot: arc + '/wado',
+        qidoRoot: arc + '/rs',
+        wadoRoot: arc + '/rs',
+        qidoSupportsIncludeField: true,
+        supportsReject: false,
+        dicomUploadEnabled: false,
+        imageRendering: 'wadors',
+        thumbnailRendering: 'wadors',
+        enableStudyLazyLoad: true,
+        supportsFuzzyMatching: true,
+        supportsWildcard: true,
+        omitQuotationForMultipartRequest: true,
+        bulkDataURI: {
+          enabled: true,
+          relativeResolution: 'studies',
+          // dcm4chee builds absolute bulk data links (for example the overlays of some Siemens protocols) with http:// and
+          // the host name of the request; arc itself speaks only http. nginx hands arc the host name without the port
+          // (proxy_set_header Host $host), so the links look like http://pacs.example.org/dcm4chee-arc/... even if the
+          // page uses another port. On an https page the browser blocks such links (mixed content), so they are rewritten
+          // to the address of the page. OHIF 3.11 and later apply only startsWith and prefixWith (no transform function).
+          startsWith: 'http://' + window.location.hostname,
+          prefixWith: origin,
+        },
+      },
+    },
+  ],
+  httpErrorHandler: error => {
+    console.warn(error.status);
+  },
+};

@@ -1,12 +1,21 @@
-# Firewall fuer die von Docker veroeffentlichten Ports (server/firewall.py, /admin/ Reiter Firewall). Setzt die Kette
-# PACS-SPERRE nach jedem Start von Docker neu, weil Docker DOCKER-USER beim Start neu anlegt.
-# Applies the iptables rules for Docker-published ports after every Docker start.
-# Erwartet das Repo unter /opt/pacs-admin (sonst die Pfade anpassen). Einstellungen in /etc/default/pacs-admin.
-# Einrichten: cp deploy/systemd/pacs-firewall.service /etc/systemd/system/ && systemctl enable --now pacs-firewall
-# Ohne PACS_DIR/firewall.json gilt der Standard-Regelsatz (FW_DEFAULT_RULES oder eingebaut), vorher pruefen mit
-# python3 /opt/pacs-admin/server/firewall.py status
+# Firewall for the ports that Docker publishes (server/firewall.py, tab Firewall in /admin/): sets the chain PACS-SPERRE again
+# after every start of Docker, because Docker rebuilds DOCKER-USER when it starts.
+# Deutsch: docs/modules.de.md#firewall
+# Settings come from /etc/default/pacs-admin (example: deploy/pacs-admin.env.example). Without PACS_DIR/firewall.json the
+# default rule set applies (FW_DEFAULT_RULES or the built-in one); look at it first with
+#   python3 /opt/pacs-admin/server/firewall.py status
+#
+# Install:  cp /opt/pacs-admin/deploy/systemd/pacs-firewall.service /etc/systemd/system/ && systemctl enable --now pacs-firewall
+# Needs iptables (apt-get install -y iptables) and iproute2; docker.service must exist (Requires=).
+# Emergency brake: systemctl stop pacs-firewall removes the jump into PACS-SPERRE, all ports are open again (ExecStop).
+#
+# Paths: the unit expects the repository in /opt/pacs-admin and Python in /usr/bin/python3 (check: command -v python3).
+# Repository somewhere else, for example /srv/pacs-admin? The path is in ExecStart AND ExecStop (and in the other unit and
+# the cron file); one command changes all of them, run it once after the cp:
+#   sed -i 's|/opt/pacs-admin|/srv/pacs-admin|g' /etc/systemd/system/pacs-*.service /etc/cron.d/pacs-dashboard && systemctl daemon-reload
+# Without this change "systemctl stop pacs-firewall" fails and the emergency brake does not work.
 [Unit]
-Description=PACS-Firewall: veroeffentlichte Docker-Ports von aussen filtern (firewall.py, /admin/ Reiter Firewall)
+Description=PACS firewall: filter the Docker-published ports from outside (firewall.py, tab Firewall in /admin/)
 After=docker.service
 Requires=docker.service
 PartOf=docker.service

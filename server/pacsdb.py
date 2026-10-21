@@ -1,13 +1,17 @@
 #!/usr/bin/env python3
-# Verschluesselte SQLite-Datenbank (SQLCipher, Debian/Ubuntu-Paket libsqlcipher0) fuer das Protokoll der Verwaltungsseite.
-# Encrypted audit log store (SQLCipher via ctypes), stdlib only, Python 3.7+.
-#   PROTOKOLL_DB   Standard /var/lib/pacs-protokoll/protokoll.db. Tabelle protokoll: Zugriffe, Ereignisse, Verwaltung,
-#                  je Zeile das JSON, das nginx per syslog schickt (verwaltung-dienst.py legt es ab)
-#   PROTOKOLL_KEY  Standard /etc/pacs-protokoll.key. Schluessel, 64 Hex-Zeichen, nur root lesbar, z. B.
-#                  (umask 077; openssl rand -hex 32 > /etc/pacs-protokoll.key). Eine Kopie gehoert in den
-#                  Passwort-Tresor: ohne den Schluessel ist die Datenbank nicht mehr lesbar.
-# Lesen als root: pacsdb.py protokoll QUELLE [VON [BIS]]  |  pacsdb.py test (Selbsttest)
-# Von Hand: sqlcipher DATEI, dann PRAGMA key = "x'<Schluessel>'";
+# Encrypted audit log store for the admin panel (SQLCipher via ctypes), stdlib only, Python 3.7+.
+# Library: package libsqlcipher1 (Debian 13, SQLCipher 4.x) or libsqlcipher0 (Debian 12 and older, SQLCipher 3.x).
+#   PROTOKOLL_DB   Default /var/lib/pacs-protokoll/protokoll.db. Table protokoll: sources zugriffe, ereignisse, admin,
+#                  one JSON line per row as nginx sends it by syslog (verwaltung-dienst.py stores it)
+#   PROTOKOLL_KEY  Default /etc/pacs-protokoll.key. 64 lowercase hex characters, readable by root only, e.g.
+#                  (umask 077; openssl rand -hex 32 > /etc/pacs-protokoll.key). Keep a copy in a password vault:
+#                  without the key the database cannot be read any more.
+# File format: new files get the SQLCipher 3 format (PRAGMA cipher_compatibility = 3), which libsqlcipher 3.x and 4.x
+# both open. A file in the SQLCipher 4 format (created with the 4.x default, e.g. by an older version of this script on
+# Debian 13) is found by a second try with the library default. libsqlcipher 3.x cannot open such a file: read it on a
+# host with libsqlcipher 4.x (docs/install.de.md#audit-key).
+# Read as root: pacsdb.py protokoll SOURCE [FROM [TO]]  |  pacsdb.py test (self-test, does not touch the key file)
+# By hand: sqlcipher FILE, then PRAGMA key = "x'<key>'"; (and PRAGMA cipher_compatibility = 3; for a version 3 file)
 import ctypes, ctypes.util, datetime, json, os, re, sys, time
 
 DB = os.environ.get("PROTOKOLL_DB") or "/var/lib/pacs-protokoll/protokoll.db"
@@ -20,17 +24,23 @@ SCHEMA = [
 
 
 def _bibliothek():
-    for name in (ctypes.util.find_library("sqlcipher"), "libsqlcipher.so.0", "libsqlcipher.so"):
+    for name in (ctypes.util.find_library("sqlcipher"), "libsqlcipher.so.1", "libsqlcipher.so.0", "libsqlcipher.so"):
         if name:
             try:
                 return ctypes.CDLL(name)
             except OSError:
                 pass
-    raise ImportError("libsqlcipher nicht gefunden. Debian/Ubuntu: apt install libsqlcipher0 "
-                      "(SQLCipher library not found, install libsqlcipher0 or your distribution's sqlcipher package)")
+    raise ImportError("libsqlcipher nicht gefunden. Debian 13: apt install libsqlcipher1, Debian 12 und aelter: apt install "
+                      "libsqlcipher0 (Release: cat /etc/os-release, Paketname: apt-cache search sqlcipher; docs/install.de.md#audit-key). "
+                      "SQLCipher library not found: install libsqlcipher1 (Debian 13) or libsqlcipher0 (Debian 12 and older)")
 
 
-_l = _bibliothek()
+try:
+    _l = _bibliothek()
+except ImportError as _e:
+    if __name__ == "__main__":   # von Hand aufgerufen: eine Zeile statt Traceback (als Modul bleibt es ein ImportError)
+        sys.exit("pacsdb.py: %s" % _e)
+    raise
 _p, _i = ctypes.c_void_p, ctypes.c_int
 for f, arg, res in [
         ("sqlite3_open_v2", [ctypes.c_char_p, ctypes.POINTER(_p), _i, ctypes.c_char_p], _i),
@@ -49,22 +59,45 @@ KOPIEREN = _p(-1)   # SQLITE_TRANSIENT: SQLite kopiert den gebundenen Wert
 
 
 class Db:
-    def __init__(self, pfad=DB, schluessel=SCHLUESSEL):
-        k = open(schluessel).read().strip()
+    # versuche: womit die Datei geoeffnet wird, der Reihe nach. 3 = PRAGMA cipher_compatibility = 3 (Format von
+    # SQLCipher 3, neue Dateien bekommen es), None = Standard der Bibliothek (4.x: Format 4). Nur der Selbsttest aendert es.
+    def __init__(self, pfad=DB, schluessel=SCHLUESSEL, versuche=(3, None)):
+        with open(schluessel) as f:
+            k = f.read().strip()
         if not re.fullmatch(r"[0-9a-f]{64}", k):
             raise ValueError("Schluessel in %s ist nicht 64 Hex-Zeichen (kleingeschrieben)" % schluessel)
-        self.h = _p()
         neu = not os.path.exists(pfad)
         if neu:
             os.makedirs(os.path.dirname(os.path.abspath(pfad)), mode=0o700, exist_ok=True)
-        if _l.sqlite3_open_v2(pfad.encode(), ctypes.byref(self.h), 0x2 | 0x4 | 0x10000, None):   # RW, CREATE, FULLMUTEX
-            raise RuntimeError("%s: %s" % (pfad, self._fehler()))
-        if neu:
-            os.chmod(pfad, 0o600)
-        _l.sqlite3_busy_timeout(self.h, 15000)
-        self.ausfuehren("PRAGMA key = \"x'%s'\"" % k)   # Rohschluessel, keine Ableitung
-        for s in SCHEMA:   # prueft zugleich den Schluessel: falsch = "file is encrypted or is not a database"
-            self.ausfuehren(s)
+        for i, kompat in enumerate(versuche):
+            self.h = _p()
+            if _l.sqlite3_open_v2(pfad.encode(), ctypes.byref(self.h), 0x2 | 0x4 | 0x10000, None):   # RW, CREATE, FULLMUTEX
+                fehler = self._fehler()
+                _l.sqlite3_close(self.h)
+                raise RuntimeError("%s: %s" % (pfad, fehler))
+            if neu:
+                os.chmod(pfad, 0o600)
+                neu = False
+            try:
+                _l.sqlite3_busy_timeout(self.h, 15000)
+                self.ausfuehren("PRAGMA key = \"x'%s'\"" % k)   # Rohschluessel, keine Ableitung
+                # 4.x schreibt sonst bei jedem Fehlversuch ERROR-Zeilen auf stderr. Erst nach key: davor setzt die
+                # erste Verbindung des Prozesses den Wert beim Start der Bibliothek wieder zurueck
+                self.ausfuehren("PRAGMA cipher_log_level = NONE")
+                if kompat:   # 3.x kennt das Pragma nicht und ignoriert es: Format 3 ist dort der Standard
+                    self.ausfuehren("PRAGMA cipher_compatibility = %d" % kompat)
+                for s in SCHEMA:   # prueft zugleich den Schluessel: falsch = "file is encrypted or is not a database"
+                    self.ausfuehren(s)
+                self.kompat = kompat
+                return
+            except RuntimeError as e:
+                _l.sqlite3_close(self.h)
+                if "not a database" not in str(e) and "encrypted" not in str(e):
+                    raise   # z. B. gesperrt: kein Formatproblem
+                if i == len(versuche) - 1:
+                    raise RuntimeError("%s: %s. Schluessel falsch, keine SQLCipher-Datei oder eine Datei im Format von SQLCipher 4, "
+                                       "die libsqlcipher 3.x nicht oeffnet (hier SQLCipher %s), siehe docs/install.de.md#audit-key"
+                                       % (pfad, e, _version()))
 
     def _fehler(self):
         return (_l.sqlite3_errmsg(self.h) or b"").decode("utf-8", "replace")
@@ -136,6 +169,19 @@ class Db:
         _l.sqlite3_close(self.h)
 
 
+def _version():
+    """SQLCipher-Version der geladenen Bibliothek, z. B. "3.4.1" oder "4.6.1 community"."""
+    x = Db.__new__(Db)
+    x.h = _p()
+    _l.sqlite3_open_v2(b":memory:", ctypes.byref(x.h), 0x2 | 0x4, None)
+    try:
+        return x.abfrage("PRAGMA cipher_version")[0][0]
+    except (RuntimeError, IndexError):
+        return "?"
+    finally:
+        _l.sqlite3_close(x.h)
+
+
 def zeitpunkt(t):
     try:
         return datetime.datetime.fromisoformat(t).timestamp()
@@ -154,28 +200,70 @@ def _test():
     import tempfile
     d = tempfile.mkdtemp()
     db, key = d + "/t.db", d + "/t.key"
-    open(key, "w").write(os.urandom(32).hex())
+
+    def schluessel_neu():
+        with open(key, "w") as f:
+            f.write(os.urandom(32).hex())
+
+    def seite(x):
+        return x.abfrage("PRAGMA cipher_page_size")[0][0]
+    schluessel_neu()
     try:
         with Db(db, key) as x:
+            assert x.kompat == 3
+            fmt3 = seite(x)
             x.viele("insert into protokoll (quelle, zeit, zeile) values (?, ?, ?)",
                     [("admin", 1.5, '{"a": "GEHEIMTEST ä"}'), ("admin", 2.0, "zwei"), ("ereignisse", 3, "x\x00y")])
             assert x.abfrage("select quelle, zeit, zeile from protokoll where quelle = ? order by zeit", ("admin",)) == \
                 [("admin", 1.5, '{"a": "GEHEIMTEST ä"}'), ("admin", 2.0, "zwei")]
             assert x.abfrage("select zeile from protokoll where quelle = ?", ("ereignisse",)) == [("x\x00y",)]
             assert x.abfrage("select count(*) from protokoll where zeile like ?", ("%GEHEIM%",)) == [(1,)]
-        roh = b"".join(open(p, "rb").read() for p in (db, db + "-wal") if os.path.exists(p))
+        roh = b""
+        for p in (db, db + "-wal"):
+            if os.path.exists(p):
+                with open(p, "rb") as f:
+                    roh += f.read()
         assert b"GEHEIMTEST" not in roh and b"SQLite format 3" not in roh, "Datei nicht verschluesselt"
-        open(key, "w").write(os.urandom(32).hex())
+        # Datei im Standardformat der Bibliothek (4.x: Format 4, so schrieb sie die Fassung vor cipher_compatibility):
+        # Db oeffnet sie im zweiten Versuch. Auf 3.x ist das Format dasselbe.
+        alt = d + "/alt.db"
+        with Db(alt, key, versuche=(None,)) as x:
+            fmt_std = seite(x)
+            x.viele("insert into protokoll (quelle, zeit, zeile) values (?, ?, ?)", [("admin", 1, "alt")])
+        with Db(alt, key) as x:
+            assert x.abfrage("select zeile from protokoll") == [("alt",)] and seite(x) == fmt_std, (seite(x), fmt_std)
+        with Db(db, key, versuche=(3,)) as x:   # die neue Datei braucht keinen zweiten Versuch
+            assert x.abfrage("select count(*) from protokoll") == [(3,)]
+        if fmt_std != fmt3:   # 4.x: die Formate unterscheiden sich wirklich, jede Datei geht nur mit ihrem eigenen
+            for datei, versuche in ((db, (None,)), (alt, (3,))):
+                try:
+                    Db(datei, key, versuche=versuche)
+                    raise AssertionError("Format 3 und Format 4 lassen sich nicht unterscheiden")
+                except RuntimeError:
+                    pass
+        schluessel_neu()   # falscher Schluessel, Datei im Standardformat und im Format 3, fremde Datei
+        with open(d + "/muell.db", "wb") as f:
+            f.write(os.urandom(8192))
+        for datei in (db, alt, d + "/muell.db"):
+            try:
+                Db(datei, key)
+                raise AssertionError("falscher Schluessel oder fremde Datei wurde angenommen: " + datei)
+            except RuntimeError as e:
+                assert "not a database" in str(e) or "encrypted" in str(e), e
+        with open(key, "w") as f:
+            f.write("kein hex")
         try:
             Db(db, key)
-            raise AssertionError("falscher Schluessel wurde angenommen")
-        except RuntimeError as e:
-            assert "not a database" in str(e) or "encrypted" in str(e), e
+            raise AssertionError("ungueltiger Schluessel wurde angenommen")
+        except ValueError:
+            pass
+        version = _version()
     finally:
         for p in os.listdir(d):
             os.unlink(os.path.join(d, p))
         os.rmdir(d)
-    print("Selbsttest ok: schreiben, lesen, Datei ohne Klartext, falscher Schluessel abgewiesen")
+    print("Selbsttest ok: schreiben, lesen, Datei ohne Klartext, falscher Schluessel und fremde Datei abgewiesen, Format 3 "
+          "(Seitengroesse %s) und Bibliotheksstandard (%s) lesbar, SQLCipher %s" % (fmt3, fmt_std, version))
 
 
 if __name__ == "__main__":
@@ -185,10 +273,13 @@ if __name__ == "__main__":
     elif a[:1] == ["protokoll"] and len(a) >= 2:
         von = zeitpunkt(a[2]) if len(a) > 2 else 0
         bis = zeitpunkt(a[3]) + 86400 if len(a) > 3 else 1e11
-        with Db() as db:
-            for (z,) in db.abfrage("select zeile from protokoll where quelle = ? and zeit >= ? and zeit < ? order by zeit, id",
-                                   (a[1], von, bis)):
-                print(z)
+        try:
+            with Db() as db:
+                for (z,) in db.abfrage("select zeile from protokoll where quelle = ? and zeit >= ? and zeit < ? order by zeit, id",
+                                       (a[1], von, bis)):
+                    print(z)
+        except (RuntimeError, ValueError, OSError) as e:   # Schluessel fehlt, falsch, Bibliothek passt nicht: eine Zeile
+            sys.exit("pacsdb.py: %s" % e)
     else:
         print("pacsdb.py test | protokoll QUELLE [VON [BIS]]   (QUELLE: zugriffe, ereignisse, admin)")
         sys.exit(1)

@@ -3,7 +3,8 @@
 // Aenderungen wirken bis zum Neuladen. demo/serve.py laedt die Datei vor config.js.
 // Fake backend for the demo: patches window.fetch for every endpoint the admin page calls. Nothing leaves the browser.
 // ?demo=platte zeigt eine neue leere Platte, ?demo=ohne eine status.json ohne Platten, ?demo=offen klappt im Firewall-Reiter
-// alle Karten auf.
+// alle Karten auf, ?demo=abgelaufen antwortet auf jeden Aufruf wie eine abgelaufene Sitzung (Meldung "Sitzung abgelaufen").
+// Das Konto im Kopf kommt von kontoUrl aus config.js (Standard /oauth2/userinfo, leer = kein Konto).
 (function () {
   const demo = new URLSearchParams(location.search).get('demo') || '';
   const KONTO = 'max.muster@example.org';
@@ -74,7 +75,7 @@
       { ae: 'US-MOBIL', an: 'DCM4CHEE', ip: '192.0.2.61', anzahl: 12, erst: iso(3000), zuletzt: iso(170) },
       { ae: 'ARCHIV2', an: 'DCM4CHEE', ip: '192.0.2.201', anzahl: 900, erst: iso(7200), zuletzt: iso(2) }],
     hl7: [{ ip: '192.0.2.35', anzahl: 311, erst: iso(7200), zuletzt: iso(6) }], ohne_ae: [] },
-    absender_stand: iso(2), clients: { stand: iso(30), muster: 'PC{001..250},WS{0001..0400}', pcs },
+    absender_stand: iso(2), clients: { stand: iso(30), muster: 'pc{01..20},ws{001..040}', pcs },
     intern: ['127.0.0.0/8', '192.0.2.192/26', '192.0.2.10/32'],   // Docker-Netz (erfunden) und der Server selbst
     vorschlaege: [{ port: 11112, quelle: '203.0.113.0/24', art: 'clients', notiz: '2 Client-PCs: WS0301, WS0302', anzahl: 0, zuletzt: '' },
       { port: 11112, quelle: '192.0.2.77', art: 'versuch-probe', notiz: '', anzahl: 3, zuletzt: iso(12) },
@@ -188,7 +189,9 @@
     const url = new URL(String(eingabe), location.origin), p = url.pathname, q = url.searchParams, m = (o.method || 'GET').toUpperCase();
     let body = null;
     try { body = o.body ? JSON.parse(o.body) : null; } catch (x) { /* kein JSON */ }
-    if (p === '/oauth2/userinfo') return json({ preferredUsername: KONTO, email: KONTO });
+    const kontoUrl = cfg().kontoUrl === undefined ? '/oauth2/userinfo' : cfg().kontoUrl;
+    if (kontoUrl && p === kontoUrl.split('?')[0]) return json({ preferredUsername: KONTO, email: KONTO });
+    if (demo === 'abgelaufen' && (p.startsWith('/admin/') || p.startsWith('/dcm4chee-arc/'))) return new Response(null, { status: 401 });
     if (p === '/admin/daten/status.json') return json(status);
     if (p === '/admin/daten/rechner.json') return json(rechner);
     if (p === '/admin/dienst/auftrag') return json(auftragStand());

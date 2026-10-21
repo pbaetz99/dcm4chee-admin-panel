@@ -52,6 +52,8 @@ header nav a:hover { color: hsl(var(--foreground)); }
 header nav a[aria-current] { background: hsl(var(--background)); color: hsl(var(--foreground)); box-shadow: 0 1px 3px rgb(0 0 0 / .5); }
 header .konto { min-width: 0; margin-left: auto; overflow: hidden; color: hsl(var(--muted-foreground)); font-size: 13px;
   white-space: nowrap; text-overflow: ellipsis; }
+header .abmelden { color: hsl(var(--muted-foreground)); font-size: 13px; white-space: nowrap; }
+header .abmelden:hover { color: hsl(var(--foreground)); }
 
 main { max-width: 1600px; margin: 0 auto; padding: 24px; }
 main > section, .stapel { display: grid; gap: 16px; align-content: start; }
@@ -148,6 +150,7 @@ td.leer { padding: 28px 12px; color: hsl(var(--muted-foreground)); text-align: c
 @media (max-width: 900px) {
   header { flex-wrap: wrap; height: auto; padding: 8px 16px; gap: 8px 16px; }
   header nav { order: 3; width: 100%; overflow-x: auto; }
+  header .konto { flex: 1 1 0; text-align: right; }   /* Konto und Abmelden bleiben in der ersten Zeile, das Konto kuerzt sich */
   main { padding: 16px; }
 }
 @media (prefers-reduced-motion: reduce) { * { transition: none !important; animation: none !important; } }

@@ -1,0 +1,90 @@
+# Docker Compose file for the PACS admin panel behind a proxy that ends TLS (Traefik, Caddy, Apache, Cloudflare Tunnel).
+# Deutsch: docs/login.de.md#login-other
+#
+# What it is: one container in two Docker networks: the one of your dcm4chee project (nginx reaches the container arc there)
+# and the one of your proxy (the proxy reaches nginx there). ohif is nginx in the OHIF image: viewer, admin panel (/admin/),
+# the calls to arc and to the helper service with their locks, and the audit log. The proxy only ends TLS, nginx keeps the
+# login and the locks; the login here is HTTP basic auth done by nginx (docs/login.md#login-basic). No port is published:
+# nginx must be reachable ONLY from the proxy, else X-Forwarded-For would be a forgery.
+#
+# Copy:   cp /opt/pacs-admin/deploy/compose/docker-compose.proxied.example.yml /opt/ohif/docker-compose.yml
+# Start:  cd /opt/ohif && docker compose up -d       Check: docker compose ps, docker logs ohif
+# In the proxy: send the host name to http://ohif:8080 (container name and container port, plain http), pass the Host header
+# unchanged (Apache: ProxyPreserveHost On) and the client address in X-Forwarded-For (Traefik, Caddy, Cloudflare Tunnel do).
+#
+# Other combinations. With oauth2-proxy: take the service ohif-auth, its flags and ohif-auth.env from
+# docker-compose.oauth2.example.yml and delete the htpasswd mount here. Without the viewer: take the image and the lines
+# of docker-compose.adminonly.example.yml (nginx:1.30, no entrypoint, command or app-config.js mount; nginx viewer none).
+#
+# The folder of this file is /opt/ohif. Before the first start it must hold the items below. For a missing item Docker makes
+# an empty folder owned by root and the service behind it does not work (preflight.sh --dir /opt/ohif finds that).
+#   nginx/            the nginx files built from deploy/nginx (deploy/nginx/README.md) with login basic, viewer ohif and
+#                     listener behind-proxy; mounted as /etc/nginx/conf.d. There is no TLS in nginx, so no tls/ folder. In
+#                     nginx/pacs/listener/server.conf the line set_real_ip_from must name the subnet of the network that only
+#                     the proxy and nginx share (docker network inspect NETWORK -f '{{(index .IPAM.Config 0).Subnet}}'): every
+#                     container on that network can write any client address into X-Forwarded-For. The shipped 203.0.113.1
+#                     trusts nobody: until it is replaced, the audit log shows the address of the proxy for every PC
+#   htpasswd/         the files users (all accounts) and admins (administrators). Make them with
+#                       bash /opt/pacs-admin/deploy/tools/pacs-adduser.sh admin NAME      (also /admin/)
+#                       bash /opt/pacs-admin/deploy/tools/pacs-adduser.sh all NAME        (viewer only)
+#                     run as root: the files get owner 101 and mode 600, which the nginx workers need. nginx reads them at
+#                     every request, so a new account works at once. Without the files nobody gets in: nginx asks for a
+#                     password and answers 403 once one is typed (docs/troubleshooting.md#htpasswd-403-500).
+#   app-config.js     OHIF configuration: cp /opt/pacs-admin/deploy/app-config.js.example /opt/ohif/app-config.js
+# Outside it: the repository in /opt/pacs-admin (the admin page), /var/lib/pacs-admin/status (written by the cron job) and
+# /run/pacs-admin (the sockets of the helper service, docs/install.md#helper-service); all three are mounted below.
+#
+# Values to change are the lines with the marker comment. List them with
+#   grep -n 'CHANGE-M[E]' /opt/ohif/docker-compose.yml        (the brackets keep this header out of the result)
+# Replace the value and delete the marker comment; then the same command prints nothing. Two lines: the name of the Docker
+# network of dcm4chee and the name of the Docker network of your proxy (last block). In nginx/pacs/listener/server.conf the
+# line set_real_ip_from carries the marker too (the subnet of the proxy network), so grep that folder as well.
+#
+# Ports: none. nginx listens on container port 8080 (http) for the proxy. There is no TLS key, so no key permissions to set.
+# No healthcheck on purpose: nginx writes every request to the audit log, a probe on / would fill it.
+
+services:
+
+  # nginx in the OHIF image: viewer, /admin/, proxy to dcm4chee-arc with the locks, audit log, basic auth.
+  ohif:
+    image: ohif/app:v3.14.0-beta.37   # fixed version: "latest" and "latest-beta" move on. The nginx in it must be 1.25.1+
+    container_name: ohif
+    restart: unless-stopped
+    # start nginx directly: the start script of the image would write a default.conf and repack app-config.js
+    entrypoint: ["/docker-entrypoint.sh"]
+    command: ["nginx", "-g", "daemon off;"]
+    networks:
+      - default   # the network of dcm4chee: nginx reaches the container arc here
+      - proxy     # the network of your proxy: the proxy reaches nginx here
+    volumes:
+      # folders, not single files: a replaced single file would keep its old content inside the container
+      - ./nginx:/etc/nginx/conf.d:ro
+      - ./htpasswd:/etc/nginx/htpasswd:ro
+      # OHIF configuration (data source: the archive behind this nginx). A single file: after an edit, docker compose restart
+      - ./app-config.js:/usr/share/nginx/html/app-config.js:ro
+      # the admin page. /opt/pacs-admin is where the repository was cloned
+      - /opt/pacs-admin/web/admin:/srv/pacs-admin/admin:ro
+      # status.json of dashboard-status.py (cron), served as /admin/daten/
+      - /var/lib/pacs-admin/status:/srv/pacs-admin/status:ro
+      # sockets of the helper service (verwaltung.sock, protokoll.sock); read only is enough for sockets. The folder must
+      # stay: if it is deleted and created again, the container sees the new one only after a restart
+      - /run/pacs-admin:/run/pacs-admin:ro
+      - /etc/localtime:/etc/localtime:ro   # local time in the audit log
+      # optional: title, AE titles, links, logo and locale of the admin page without changing the repository
+      # (copy web/admin/config.js to /opt/ohif/config.js, edit it, delete the "# " in front of the next line)
+      # - ./config.js:/srv/pacs-admin/admin/config.js:ro
+      # optional: logo from the same address (config.js: logo: '/pacs-logo.svg'); /admin/ sends Cross-Origin-Embedder-Policy
+      # require-corp, a logo from another server does not load
+      # - ./logo.svg:/usr/share/nginx/html/pacs-logo.svg:ro
+
+networks:
+  # The Docker network of your dcm4chee project: the container arc lives there.
+  default:
+    name: dcm4chee-arc_default   # CHANGE-ME: name of that network (docker network ls; preflight.sh prints it)
+    external: true
+  # The Docker network of your proxy. Best a network that only the proxy and this container share: every container in it
+  # can reach nginx directly and could forge X-Forwarded-For. Is the proxy in the dcm4chee network itself? Then delete this
+  # network and the line "- proxy" above.
+  proxy:
+    name: proxy_default   # CHANGE-ME: name of the network of your proxy (docker network ls)
+    external: true

@@ -14,12 +14,14 @@
 #   pacs-storage.sh anhaengen ID [ja]     Storage mit Platz hinten an die Schreibliste
 #   pacs-storage.sh abhaengen ID [ja]     Storage aus der Schreibliste nehmen (keine neuen Bilder, alte bleiben lesbar)
 #
-# Einstellungen aus der Umgebung oder /etc/default/pacs-admin (alter Name in Klammern gilt weiter, der neue hat Vorrang;
-# die neuen Namen ausdruecklich setzen), Vorgabe:
-#   STORAGE_BASE (BASE) /mnt/fs            STORAGE_PREFIX (PREFIX) PACS-Data    STORAGE_OWNER (OWNER) 1023:1023
-#   STORAGE_MIN_GB (MIN_GB) 100            STORAGE_FREE_GB (FREI_GB) 50         STORAGE_LOG (LOG) /var/log/pacs-storage.log
-#   ARC_DEVICE dcm4chee-arc                ARC_AET (AE) DCM4CHEE                ARC_URL http://127.0.0.1:8080
-#   ARC_CONTAINER (C_ARC) arc              LDAP_CONTAINER (C_LDAP) ldap         LDAP_BASE_DN dc=dcm4che,dc=org
+# Exit 0 = erledigt, 1 = HALT oder anderer Fehler (Grund in der Zeile "HALT: ..."), 3 = im LDAP geaendert, aber das Archiv
+# hat die Konfiguration nicht neu geladen (Zeile "ACHTUNG: ...": in der Oberflaeche des Archivs "Neu laden" klicken).
+#
+# Einstellungen aus der Umgebung oder /etc/default/pacs-admin, Vorgabe:
+#   STORAGE_BASE /mnt/fs                   STORAGE_PREFIX PACS-Data             STORAGE_OWNER 1023:1023
+#   STORAGE_MIN_GB 100                     STORAGE_FREE_GB 50                   STORAGE_LOG /var/log/pacs-storage.log
+#   ARC_DEVICE dcm4chee-arc                ARC_AET DCM4CHEE                     ARC_URL http://127.0.0.1:8080
+#   ARC_CONTAINER arc                      LDAP_CONTAINER ldap                  LDAP_BASE_DN dc=dcm4che,dc=org
 # STORAGE_PREFIX: Buchstabe, dann Buchstaben, Ziffern, - und _, hoechstens 14 Zeichen (ext4-Label max. 16 mit Nummer).
 # Nur fuer Tests: FSTAB (Vorgabe /etc/fstab), PACS_STORAGE_TEST (gesetzt: Loop-Geraete erlaubt).
 #
@@ -33,29 +35,42 @@
 #
 # LDAP: ldapsearch/ldapmodify laufen im LDAP-Container mit dessen eigenem Root-Zugang (LDAP_ROOTPASS oder
 # LDAP_ROOTPASS_FILE, Root-DN LDAP_ROOTDN oder cn=admin,LDAP_BASE_DN des Containers). Auf dem Host liegt kein Passwort.
-[ -r /etc/default/pacs-admin ] && { set -a; . /etc/default/pacs-admin; set +a; }
+# Alle Befehle ausser kandidaten und nomount pruefen zuerst, ob LDAP lesbar ist: sonst HALT mit Grund und Exit 1 (scan
+# meldet "keine Platten" und "LDAP nicht erreichbar" so nie gleich). kandidaten bleibt tolerant (leere Felder).
+if [ -r /etc/default/pacs-admin ]; then
+    # bash -n zuerst: ein Syntaxfehler (z. B. offenes Anfuehrungszeichen) bricht sonst nur diesen einen Aufruf kommentarlos ab
+    bash -n /etc/default/pacs-admin || { echo "  HALT: /etc/default/pacs-admin hat einen Syntaxfehler (Meldung davor)"; exit 1; }
+    set -a; . /etc/default/pacs-admin; set +a
+fi
 set -u
-BASE=${STORAGE_BASE:-${BASE:-/mnt/fs}}; PREFIX=${STORAGE_PREFIX:-${PREFIX:-PACS-Data}}; FSTAB=${FSTAB:-/etc/fstab}
-C_ARC=${ARC_CONTAINER:-${C_ARC:-arc}}; C_LDAP=${LDAP_CONTAINER:-${C_LDAP:-ldap}}; AE=${ARC_AET:-${AE:-DCM4CHEE}}
+STORAGE_BASE=${STORAGE_BASE:-/mnt/fs}; STORAGE_PREFIX=${STORAGE_PREFIX:-PACS-Data}; FSTAB=${FSTAB:-/etc/fstab}
+STORAGE_BASE=${STORAGE_BASE%/}   # "/mnt/fs/" ergaebe "//" in den Pfaden, die dann nicht zu den fstab-Zeilen passen
+ARC_CONTAINER=${ARC_CONTAINER:-arc}; LDAP_CONTAINER=${LDAP_CONTAINER:-ldap}; ARC_AET=${ARC_AET:-DCM4CHEE}
 ARC_URL=${ARC_URL:-http://127.0.0.1:8080}; ARC_DEVICE=${ARC_DEVICE:-dcm4chee-arc}
 LDAP_BASE_DN=${LDAP_BASE_DN:-dc=dcm4che,dc=org}
-MIN_GB=${STORAGE_MIN_GB:-${MIN_GB:-100}}; FREI_GB=${STORAGE_FREE_GB:-${FREI_GB:-50}}; TEST=${PACS_STORAGE_TEST:-}
-LOG=${STORAGE_LOG:-${LOG:-/var/log/pacs-storage.log}}
-OWNER=${STORAGE_OWNER:-${OWNER:-1023:1023}}   # uid:gid von wildfly im dcm4chee-arc-Image
-# PREFIX steht ungeschuetzt in Regex (awk, sed, grep) und wird mit der Nummer zum ext4-Label (hoechstens 16 Zeichen)
-[[ $PREFIX =~ ^[A-Za-z][A-Za-z0-9_-]{0,13}$ ]] || { echo "  HALT: STORAGE_PREFIX '$PREFIX' ungueltig (Buchstabe, dann Buchstaben, Ziffern, - und _, hoechstens 14 Zeichen: ext4-Label max. 16)"; exit 1; }
+STORAGE_MIN_GB=${STORAGE_MIN_GB:-100}; STORAGE_FREE_GB=${STORAGE_FREE_GB:-50}; TEST=${PACS_STORAGE_TEST:-}
+STORAGE_LOG=${STORAGE_LOG:-/var/log/pacs-storage.log}
+STORAGE_OWNER=${STORAGE_OWNER:-1023:1023}   # uid:gid von wildfly im dcm4chee-arc-Image
+# Zahlen werden gerechnet: "50GB" wuerde sonst mit einer Meldung von bash abbrechen, und "08" oder "010" gelten in bash als
+# Oktalzahl (08 bricht ab, 010 wird zu 8). Darum nur 0 oder Ziffernfolge ohne fuehrende Null, wie dashboard-status.py, und
+# hoechstens 6 Stellen (999999 GB reichen; mit 20 Stellen laeuft die Rechnung in bash ueber und liefert negative Zahlen).
+for v in STORAGE_MIN_GB STORAGE_FREE_GB; do
+    [[ ${!v} =~ ^(0|[1-9][0-9]{0,5})$ ]] || { echo "  HALT: $v='${!v}' ist keine ganze Zahl ohne fuehrende Null mit hoechstens 6 Stellen (/etc/default/pacs-admin)"; exit 1; }
+done
+# STORAGE_PREFIX steht ungeschuetzt in Regex (awk, sed, grep) und wird mit der Nummer zum ext4-Label (hoechstens 16 Zeichen)
+[[ $STORAGE_PREFIX =~ ^[A-Za-z][A-Za-z0-9_-]{0,13}$ ]] || { echo "  HALT: STORAGE_PREFIX '$STORAGE_PREFIX' ungueltig (Buchstabe, dann Buchstaben, Ziffern, - und _, hoechstens 14 Zeichen: ext4-Label max. 16)"; exit 1; }
 DEV_DN="dicomDeviceName=$ARC_DEVICE,cn=Devices,cn=DICOM Configuration,$LDAP_BASE_DN"
-AE_DN="dicomAETitle=$AE,$DEV_DN"
+AE_DN="dicomAETitle=$ARC_AET,$DEV_DN"
 GiB=$((1024*1024*1024))
 TS=$(date +%Y%m%d-%H%M%S)
 
 [ "$(id -u)" = 0 ] || { echo "als root aufrufen"; exit 1; }
 exec 9>/run/pacs-storage.lock
-if [ "${1:-}" = kandidaten ]; then
-    flock -w 120 9 || exit 1          # regelmaessig aus dem Cron: wartet, bis ein laufendes add fertig ist
+if [ "${1:-}" = kandidaten ]; then   # regelmaessig aus dem Cron: wartet, bis ein laufendes add fertig ist
+    flock -w 120 9 || { echo "  HALT: laeuft schon, ein anderer Aufruf von pacs-storage.sh haelt die Sperre /run/pacs-storage.lock seit ueber 120 s"; exit 1; }
 else
-    flock -w 30 9 || { echo "laeuft schon"; exit 1; }
-    exec > >(tee -a "$LOG") 2>&1
+    flock -w 30 9 || { echo "  HALT: laeuft schon, ein anderer Aufruf von pacs-storage.sh haelt die Sperre /run/pacs-storage.lock seit ueber 30 s"; exit 1; }
+    exec > >(tee -a "$STORAGE_LOG") 2>&1
     echo "=== $(date '+%F %T') pacs-storage.sh $*"
 fi
 
@@ -68,12 +83,25 @@ LDAP_SH='if [ -n "${LDAP_ROOTPASS_FILE:-}" ]; then pw=$(cat "$LDAP_ROOTPASS_FILE
 [ -n "$pw" ] || { echo "LDAP_ROOTPASS im LDAP-Container nicht gesetzt" >&2; exit 1; }
 f=$(mktemp) || exit 1; printf %s "$pw" > "$f"
 c=$1; shift; "$c" -x -H ldap://localhost -D "${LDAP_ROOTDN:-cn=admin,$LDAP_BASE_DN}" -y "$f" "$@"; rc=$?; rm -f "$f"; exit $rc'
-lsearch() { docker exec $C_LDAP sh -c "$LDAP_SH" sh ldapsearch -LLL -o ldif-wrap=no "$@"; }
-lmodify() { docker exec -i $C_LDAP sh -c "$LDAP_SH" sh ldapmodify >/dev/null; }
+lsearch() { docker exec $LDAP_CONTAINER sh -c "$LDAP_SH" sh ldapsearch -LLL -o ldif-wrap=no "$@"; }
+lmodify() { docker exec -i $LDAP_CONTAINER sh -c "$LDAP_SH" sh ldapmodify >/dev/null; }
 ae_list() { lsearch -b "$AE_DN" -s base $1 | sed -n "s/^$1: //p"; }             # Reihenfolge wie im LDAP
 storage_ids() { lsearch -b "$DEV_DN" -s one '(objectClass=dcmStorage)' dcmStorageID | sed -n 's/^dcmStorageID: //p'; }
-mounted() { findmnt -rn -o TARGET,SOURCE | awk -v p="^$BASE/$PREFIX[0-9]+$" '$1 ~ p {n=split($1,a,"/"); print a[n], $2}'; }
-fs_bytes() { tune2fs -l $1 | awk -F: '/^Block count/{c=$2} /^Block size/{s=$2} END{printf "%.0f", c*s}'; }
+mounted() { findmnt -rn -o TARGET,SOURCE | awk -v p="^$STORAGE_BASE/${STORAGE_PREFIX}[0-9]+$" '$1 ~ p {n=split($1,a,"/"); print a[n], $2}'; }
+fs_bytes() { tune2fs -l "$1" | awk -F: '/^Block count/{c=$2} /^Block size/{s=$2} END{printf "%.0f", c*s}'; }
+
+# LDAP lesbar? Sonst Abbruch mit klarer Meldung (Exit 1) statt leerer Abschnitte: ohne Antwort sehen "keine Platten" und
+# "LDAP nicht erreichbar" gleich aus, und add haette die Platte schon formatiert, wenn activate danach scheitert.
+ldap_pruefen() {
+    local out rc
+    command -v docker >/dev/null || halt "docker nicht gefunden (Docker installieren, z. B. apt install docker.io)"
+    out=$(lsearch -b "$AE_DN" -s base dicomAETitle 2>&1); rc=$?
+    case $rc in
+        0)  return 0 ;;
+        32) halt "AE '$ARC_AET' (Geraet '$ARC_DEVICE') steht nicht im LDAP von '$LDAP_CONTAINER'. ARC_AET, ARC_DEVICE und LDAP_BASE_DN in /etc/default/pacs-admin pruefen (docs/modules.de.md#disk-assistant)" ;;
+        *)  halt "LDAP nicht lesbar (Container '$LDAP_CONTAINER'): $(printf %s "$out" | tail -n 1). Pruefen: docker ps (Name = LDAP_CONTAINER), LDAP_ROOTPASS oder LDAP_ROOTPASS_FILE in der Umgebung des LDAP-Containers (docs/modules.de.md#disk-assistant)" ;;
+    esac
+}
 
 # Gruende, warum ein Geraet NICHT formatiert werden darf. Leer = darf.
 not_blank() {
@@ -83,13 +111,13 @@ not_blank() {
     [ "$t" = disk ] || { [ -n "$TEST" ] && [ "$t" = loop ]; } || echo "Typ $t"
     [ "$(lsblk -dno RO $d | tr -d ' ')" = 0 ] || echo "schreibgeschuetzt"
     [ "$(lsblk -no NAME $d | wc -l)" = 1 ] || echo "hat Partitionen"
-    [ -z "$(ls /sys/class/block/$(basename $d)/holders 2>/dev/null)" ] || echo "in Benutzung (LVM/RAID)"
+    [ -z "$(ls "/sys/class/block/$(basename "$d")/holders" 2>/dev/null)" ] || echo "in Benutzung (LVM/RAID)"
     t=$(wipefs --no-act --noheadings --output TYPE $d 2>/dev/null | paste -sd ' '); [ -z "$t" ] || echo "Signatur $t"
     t=$(blkid -p -o value -s TYPE $d 2>/dev/null); [ -z "$t" ] || echo "Dateisystem $t"
     findmnt -S $d >/dev/null && echo "gemountet"
     grep -qw "$d" $FSTAB && echo "steht in $FSTAB"
     swapon --show=NAME --noheadings | grep -qx "$d" && echo "Swap"
-    [ "$(blockdev --getsize64 $d)" -ge $((MIN_GB*GiB)) ] || echo "kleiner als $MIN_GB GiB"
+    [ "$(blockdev --getsize64 $d)" -ge $((STORAGE_MIN_GB*GiB)) ] || echo "kleiner als $STORAGE_MIN_GB GiB"
     cmp -s -n 1048576 $d /dev/zero || echo "erstes MiB nicht leer"
 }
 
@@ -111,9 +139,9 @@ candidates() {
 
 next_id() {
     local n
-    n=$( { storage_ids; ls $BASE; grep -oE "LABEL=$PREFIX[0-9]+" $FSTAB | cut -d= -f2; } 2>/dev/null \
-        | sed -n "s/^$PREFIX\([0-9]\+\)$/\1/p" | sed 's/^0*//' | sort -n | tail -1)
-    printf "%s%02d" $PREFIX $(( ${n:-0} + 1 ))
+    n=$( { storage_ids; ls $STORAGE_BASE; grep -oE "LABEL=${STORAGE_PREFIX}[0-9]+" $FSTAB | cut -d= -f2; } 2>/dev/null \
+        | sed -n "s/^$STORAGE_PREFIX\([0-9]\+\)$/\1/p" | sed 's/^0*//' | sort -n | tail -1)
+    printf "%s%02d" $STORAGE_PREFIX $(( ${n:-0} + 1 ))
 }
 
 # Verzeichnis unter einem Mountpunkt (vom Mount verdeckt): Bind von / in eigenem Mount-Namespace,
@@ -126,13 +154,15 @@ peek_under() {
 }
 
 reload_arc() {
-    local c i
-    for i in 1 2 3; do
+    local c
+    for _ in 1 2 3; do
         c=$(curl -s -m 30 -o /dev/null -w '%{http_code}' -X POST $ARC_URL/dcm4chee-arc/ctrl/reload)
         [ "$c" = 204 ] || [ "$c" = 200 ] && { ok "Archiv-Konfiguration neu geladen"; return 0; }
         sleep 5
     done
-    echo "  ACHTUNG: Archiv-Konfiguration nicht neu geladen (HTTP $c). UI: Konfiguration, Neu laden"; return 1
+    # Die Aenderung steht dann schon im LDAP: Exit 3 statt 1 ("nichts getan"), damit verwaltung-dienst.py und die Seite beides trennen
+    echo "  ACHTUNG: Archiv-Konfiguration nicht neu geladen (Antwort $c). Die Aenderung steht im LDAP, das Archiv arbeitet bis zum Neuladen mit der alten Konfiguration. In der Oberflaeche des Archivs unter Konfiguration auf Neu laden klicken."
+    exit 3
 }
 
 # Storage hinten an die Schreibliste der AE, Objekte und Metadaten
@@ -142,28 +172,39 @@ append_to_ae() {
         ae_list $a | grep -qx "$id" && continue
         printf 'dn: %s\nchangetype: modify\nadd: %s\n%s: %s\n' "$AE_DN" $a $a "$id" | lmodify || halt "$a nicht ergaenzt"
     done
-    ok "Schreibliste $AE: $(ae_list dcmObjectStorageID | tr '\n' ' ')/ Metadaten: $(ae_list dcmMetadataStorageID | tr '\n' ' ')"
+    ok "Schreibliste $ARC_AET: $(ae_list dcmObjectStorageID | tr '\n' ' ')/ Metadaten: $(ae_list dcmMetadataStorageID | tr '\n' ' ')"
+}
+
+# Gibt es keinen Storage, sagt das jeder Befehl, der welche braucht (statt leerer Abschnitte oder eines falschen "ok")
+keine_storages() {
+    echo "  keine Storages unter $STORAGE_BASE gefunden: gesucht werden eingehaengte Platten mit den Namen ${STORAGE_PREFIX}01," \
+         "${STORAGE_PREFIX}02 ... Das ist vor der ersten Platte normal (docs/modules.de.md#disk-assistant)."
+    [ -d "$STORAGE_BASE" ] || echo "  $STORAGE_BASE gibt es nicht: mkdir -p $STORAGE_BASE"
 }
 
 scan() {
-    local id dev sz av used
+    local id dev sz av used c out
     rescan
     used=" $(ae_list dcmObjectStorageID | tr '\n' ' ') "
     echo "--- Storages"
-    mounted | sort | while read id dev; do
-        read sz av <<< "$(df -B1 --output=size,avail $BASE/$id | tail -1)"
-        printf '  %-12s %-10s %9s gesamt %9s frei%s\n' $id $dev "$(gib $sz)" "$(gib $av)" \
+    [ -n "$(mounted)" ] || keine_storages
+    mounted | sort | while read -r id dev; do
+        read -r sz av <<< "$(df -B1 --output=size,avail "$STORAGE_BASE/$id" | tail -1)"
+        printf '  %-12s %-10s %9s gesamt %9s frei%s\n' "$id" "$dev" "$(gib "$sz")" "$(gib "$av")" \
             "$(case "$used" in *" $id "*) echo "   Schreibliste";; esac)"
     done
     echo "--- Leere Platten (add)"
-    candidates | while read dev; do echo "  $dev $(gib $(blockdev --getsize64 $dev)) $(lsblk -dno MODEL $dev)"; done
+    c=$(candidates); [ -n "$c" ] || echo "  keine"
+    for dev in $c; do echo "  $dev $(gib "$(blockdev --getsize64 "$dev")") $(lsblk -dno MODEL "$dev")"; done
     echo "--- Vergroesserte Platten (grow)"
-    mounted | while read id dev; do
-        [ $(( $(blockdev --getsize64 $dev) - $(fs_bytes $dev) )) -gt $GiB ] \
-            && echo "  $dev $id: Platte $(gib $(blockdev --getsize64 $dev)), Dateisystem $(gib $(fs_bytes $dev))"
-    done
+    out=$(mounted | while read -r id dev; do
+        [ $(( $(blockdev --getsize64 "$dev") - $(fs_bytes "$dev") )) -gt $GiB ] \
+            && echo "  $dev $id: Platte $(gib "$(blockdev --getsize64 "$dev")"), Dateisystem $(gib "$(fs_bytes "$dev")")"
+    done)
+    echo "${out:-  keine}"
     echo "--- NO_MOUNT fehlt unter dem Mountpunkt (nomount)"
-    mounted | sort | while read id dev; do peek_under $BASE/$id "[ -e {}/NO_MOUNT ]" || echo "  $id"; done
+    out=$(mounted | sort | while read -r id dev; do peek_under "$STORAGE_BASE/$id" "[ -e {}/NO_MOUNT ]" || echo "  $id"; done)
+    echo "${out:-  keine}"
 }
 
 add() {
@@ -171,15 +212,15 @@ add() {
     [ -n "$d" ] || halt "Aufruf: add /dev/sdX [ja]"
     rescan
     r=$(not_blank $d); [ -z "$r" ] || halt "$d wird nicht formatiert: $(echo "$r" | paste -sd ';')"
-    id=$(next_id); mp=$BASE/$id
+    id=$(next_id); mp=$STORAGE_BASE/$id
     [ ! -e $mp ] || [ -z "$(ls -A $mp)" ] || halt "$mp existiert und ist nicht leer"
     [ -z "$(blkid -L $id 2>/dev/null)" ] || halt "Label $id gibt es schon"
     storage_ids | grep -qx $id && halt "$id steht schon im LDAP"
     echo "--- Plan"
-    echo "  Platte:  $d, $(gib $(blockdev --getsize64 $d)), $(lsblk -dno MODEL $d), leer"
+    echo "  Platte:  $d, $(gib "$(blockdev --getsize64 "$d")"), $(lsblk -dno MODEL "$d"), leer"
     echo "  Format:  ext4, Label $id, ohne root-Reserve (-m 0)"
     echo "  Mount:   $mp, fstab: LABEL=$id $mp ext4 nosuid,nodev,nofail 0 0"
-    echo "  Archiv:  Storage $id wie $(ae_list dcmObjectStorageID | head -1), Schreibliste $AE danach:" \
+    echo "  Archiv:  Storage $id wie $(ae_list dcmObjectStorageID | head -1), Schreibliste $ARC_AET danach:" \
          "$(ae_list dcmObjectStorageID | tr '\n' ' ')$id"
     [ "$ja" = ja ] || { echo "Trockenlauf. Ausfuehren: $0 add $d ja"; exit 0; }
 
@@ -193,7 +234,7 @@ add() {
     udevadm settle
     mount -T $FSTAB $mp || halt "mount fehlgeschlagen. fstab-Zeile steht, Sicherung $FSTAB.bak-$TS"
     [ "$(findmnt -n -o SOURCE $mp)" = "$d" ] || halt "$mp ist nicht $d"
-    chown $OWNER $mp && chmod 755 $mp
+    chown $STORAGE_OWNER $mp && chmod 755 $mp
     ok "gemountet $mp, fstab ergaenzt (vorher $FSTAB.bak-$TS), NO_MOUNT darunter"
     activate $id ja
 }
@@ -201,21 +242,21 @@ add() {
 activate() {
     local id=${1:-} ja=${2:-} mp tmpl t0 ldif
     [ -n "$id" ] || halt "Aufruf: activate ID [ja]"
-    mp=$BASE/$id
+    mp=$STORAGE_BASE/$id
     mounted | awk '{print $1}' | grep -qx "$id" || halt "$mp ist nicht gemountet"
-    tmpl=$(ae_list dcmObjectStorageID | head -1); [ -n "$tmpl" ] || tmpl=$(storage_ids | grep "^$PREFIX" | sort | tail -1)
+    tmpl=$(ae_list dcmObjectStorageID | head -1); [ -n "$tmpl" ] || tmpl=$(storage_ids | grep "^$STORAGE_PREFIX" | sort | tail -1)
     [ -n "$tmpl" ] && [ "$tmpl" != "$id" ] || halt "kein Vorlage-Storage gefunden"
     if [ "$ja" != ja ]; then
-        echo "  Storage $id wie $tmpl anlegen (falls neu), hinten an die Schreibliste von $AE"
+        echo "  Storage $id wie $tmpl anlegen (falls neu), hinten an die Schreibliste von $ARC_AET"
         echo "Trockenlauf. Ausfuehren: $0 activate $id ja"; exit 0
     fi
-    echo "--- Sichtbar im Container $C_ARC?"
+    echo "--- Sichtbar im Container $ARC_CONTAINER?"
     t0=$TS-$$; echo $t0 > $mp/.pacs-storage-check
-    [ "$(docker exec $C_ARC cat $mp/.pacs-storage-check 2>/dev/null)" = "$t0" ] || { rm -f $mp/.pacs-storage-check
-        halt "$C_ARC sieht $mp nicht, Archiv NICHT geaendert. arc braucht '- $BASE:$BASE:rslave' in Compose und
+    [ "$(docker exec $ARC_CONTAINER cat $mp/.pacs-storage-check 2>/dev/null)" = "$t0" ] || { rm -f $mp/.pacs-storage-check
+        halt "$ARC_CONTAINER sieht $mp nicht, Archiv NICHT geaendert. arc braucht '- $STORAGE_BASE:$STORAGE_BASE:rslave' in Compose und
         einmal neu erzeugen (Ausfall ~30 s). Danach: $0 activate $id ja"; }
     rm -f $mp/.pacs-storage-check
-    docker exec -u $OWNER $C_ARC sh -c "touch $mp/.w && rm $mp/.w" || halt "$C_ARC kann in $mp nicht schreiben, Archiv NICHT geaendert"
+    docker exec -u $STORAGE_OWNER $ARC_CONTAINER sh -c "touch $mp/.w && rm $mp/.w" || halt "$ARC_CONTAINER kann in $mp nicht schreiben, Archiv NICHT geaendert"
     ok "Container sieht die Platte und kann schreiben"
 
     echo "--- Archiv"
@@ -240,15 +281,15 @@ grow() {
     local d=${1:-} ja=${2:-} id disk fs
     [ -n "$d" ] || halt "Aufruf: grow /dev/sdX [ja]"
     rescan
-    id=$(mounted | awk -v d=$d '$2==d {print $1}'); [ -n "$id" ] || halt "$d ist kein gemounteter Storage unter $BASE"
+    id=$(mounted | awk -v d=$d '$2==d {print $1}'); [ -n "$id" ] || halt "$d ist kein gemounteter Storage unter $STORAGE_BASE"
     disk=$(blockdev --getsize64 $d); fs=$(fs_bytes $d)
     [ $((disk - fs)) -gt $GiB ] || { ok "$id: Dateisystem nutzt die Platte schon ($(gib $fs))"; exit 0; }
     echo "--- Plan"
     echo "  $id auf $d: Dateisystem $(gib $fs) -> $(gib $disk), online mit resize2fs"
-    ae_list dcmObjectStorageID | grep -qx $id || echo "  $id steht nicht in der Schreibliste von $AE (war voll): hinten anfuegen"
+    ae_list dcmObjectStorageID | grep -qx $id || echo "  $id steht nicht in der Schreibliste von $ARC_AET (war voll): hinten anfuegen"
     [ "$ja" = ja ] || { echo "Trockenlauf. Ausfuehren: $0 grow $d ja"; exit 0; }
     resize2fs $d || halt "resize2fs fehlgeschlagen"
-    ok "$id jetzt $(gib $(fs_bytes $d)), frei $(df -h --output=avail $BASE/$id | tail -1 | tr -d ' ')"
+    ok "$id jetzt $(gib "$(fs_bytes "$d")"), frei $(df -h --output=avail $STORAGE_BASE/$id | tail -1 | tr -d ' ')"
     ae_list dcmObjectStorageID | grep -qx $id || { append_to_ae $id; reload_arc; }
 }
 
@@ -258,14 +299,14 @@ grow() {
 freigeben() {
     local id=${1:-} ja=${2:-} av
     [ -n "$id" ] || halt "Aufruf: freigeben ID [ja]"
-    mounted | awk '{print $1}' | grep -qx "$id" || halt "$BASE/$id ist nicht gemountet"
+    mounted | awk '{print $1}' | grep -qx "$id" || halt "$STORAGE_BASE/$id ist nicht gemountet"
     lsearch -b "dcmStorageID=$id,$DEV_DN" -s base dcmStorageThresholdExceeded | grep -q '^dcmStorageThresholdExceeded:' \
         || { ok "$id ist nicht als voll markiert"; exit 0; }
-    av=$(df -B1 --output=avail $BASE/$id | tail -1)
-    [ "$av" -ge $((FREI_GB * 1000 ** 3)) ] || halt "$id hat nur $(gib $av) frei, unter $FREI_GB GB bleibt die Markierung"
+    av=$(df -B1 --output=avail $STORAGE_BASE/$id | tail -1)
+    [ "$av" -ge $((STORAGE_FREE_GB * 1000 ** 3)) ] || halt "$id hat nur $(gib $av) frei, unter $STORAGE_FREE_GB GB bleibt die Markierung"
     echo "  $id: Markierung voll entfernen, $(gib $av) frei, $(ae_list dcmObjectStorageID | grep -qx $id \
-        && echo "steht in der Schreibliste von $AE: wird wieder beschrieben, sobald die Platten davor voll sind" \
-        || echo "steht in keiner Schreibliste von $AE: bekommt keine neuen Bilder")"
+        && echo "steht in der Schreibliste von $ARC_AET: wird wieder beschrieben, sobald die Platten davor voll sind" \
+        || echo "steht in keiner Schreibliste von $ARC_AET: bekommt keine neuen Bilder")"
     [ "$ja" = ja ] || { echo "Trockenlauf. Ausfuehren: $0 freigeben $id ja"; exit 0; }
     markierung_weg $id
     reload_arc
@@ -283,12 +324,12 @@ markierung_weg() {
 anhaengen() {
     local id=${1:-} ja=${2:-} av
     [ -n "$id" ] || halt "Aufruf: anhaengen ID [ja]"
-    mounted | awk '{print $1}' | grep -qx "$id" || halt "$BASE/$id ist nicht gemountet"
-    storage_ids | grep -qx "$id" || halt "$id steht nicht im Archiv, neue Platte mit add einrichten"
+    mounted | awk '{print $1}' | grep -qx "$id" || halt "$STORAGE_BASE/$id ist nicht gemountet"
+    storage_ids | grep -qx "$id" || halt "$id steht nicht im Archiv, mit activate eintragen"
     ae_list dcmObjectStorageID | grep -qx "$id" && { ok "$id steht schon in der Schreibliste"; exit 0; }
-    av=$(df -B1 --output=avail $BASE/$id | tail -1)
-    [ "$av" -ge $((FREI_GB * 1000 ** 3)) ] || halt "$id hat nur $(gib $av) frei, unter $FREI_GB GB nicht in die Schreibliste"
-    echo "  $id, $(gib $av) frei, hinten an die Schreibliste von $AE: $(ae_list dcmObjectStorageID | paste -sd ' ') $id"
+    av=$(df -B1 --output=avail $STORAGE_BASE/$id | tail -1)
+    [ "$av" -ge $((STORAGE_FREE_GB * 1000 ** 3)) ] || halt "$id hat nur $(gib $av) frei, unter $STORAGE_FREE_GB GB nicht in die Schreibliste"
+    echo "  $id, $(gib $av) frei, hinten an die Schreibliste von $ARC_AET: $(ae_list dcmObjectStorageID | paste -sd ' ') $id"
     [ "$ja" = ja ] || { echo "Trockenlauf. Ausfuehren: $0 anhaengen $id ja"; exit 0; }
     markierung_weg $id
     append_to_ae $id
@@ -309,25 +350,29 @@ abhaengen() {
         [ -n "$rest" ] || halt "$id ist in $a die letzte Platte, die nicht voll ist. Erst eine andere aufnehmen."
     done
     [ -n "$drin" ] || { ok "$id steht in keiner Schreibliste"; exit 0; }
-    echo "  $id aus der Schreibliste von $AE nehmen: bekommt keine neuen Bilder mehr, vorhandene bleiben lesbar." \
+    echo "  $id aus der Schreibliste von $ARC_AET nehmen: bekommt keine neuen Bilder mehr, vorhandene bleiben lesbar." \
          "Danach: $(ae_list dcmObjectStorageID | grep -vx "$id" | paste -sd ' ')"
     [ "$ja" = ja ] || { echo "Trockenlauf. Ausfuehren: $0 abhaengen $id ja"; exit 0; }
     for a in $drin; do
         printf 'dn: %s\nchangetype: modify\ndelete: %s\n%s: %s\n' "$AE_DN" $a $a "$id" | lmodify || halt "$a nicht geaendert"
     done
-    ok "Schreibliste $AE: $(ae_list dcmObjectStorageID | tr '\n' ' ')/ Metadaten: $(ae_list dcmMetadataStorageID | tr '\n' ' ')"
+    ok "Schreibliste $ARC_AET: $(ae_list dcmObjectStorageID | tr '\n' ' ')/ Metadaten: $(ae_list dcmMetadataStorageID | tr '\n' ' ')"
     reload_arc
 }
 
 nomount() {
     local ja=${1:-} id miss=""
-    for id in $(mounted | awk '{print $1}' | sort); do peek_under $BASE/$id "[ -e {}/NO_MOUNT ]" || miss="$miss $id"; done
+    [ -n "$(mounted)" ] || { keine_storages; exit 0; }
+    for id in $(mounted | awk '{print $1}' | sort); do peek_under $STORAGE_BASE/$id "[ -e {}/NO_MOUNT ]" || miss="$miss $id"; done
     [ -n "$miss" ] || { ok "NO_MOUNT liegt unter allen Mountpunkten"; exit 0; }
     echo "  fehlt unter:$miss"
     [ "$ja" = ja ] || { echo "Trockenlauf. Ausfuehren: $0 nomount ja"; exit 0; }
-    for id in $miss; do peek_under $BASE/$id "touch {}/NO_MOUNT && chmod 444 {}/NO_MOUNT" && ok "$id"; done
+    for id in $miss; do peek_under $STORAGE_BASE/$id "touch {}/NO_MOUNT && chmod 444 {}/NO_MOUNT" && ok "$id"; done
 }
 
+case "${1:-}" in
+    scan|auto|add|activate|grow|freigeben|anhaengen|abhaengen) ldap_pruefen ;;
+esac
 case "${1:-}" in
     scan)     scan ;;
     auto)     rescan; c=$(candidates)
@@ -358,5 +403,5 @@ case "${1:-}" in
               l=$(lsearch -b "$AE_DN" -s base dcmObjectStorageID) \
                   && echo "schreibliste $(sed -n 's/^dcmObjectStorageID: //p' <<<"$l" | paste -sd ' ')"
               echo "voll $(lsearch -b "$DEV_DN" -s one '(dcmStorageThresholdExceeded=*)' dcmStorageID | sed -n 's/^dcmStorageID: //p' | paste -sd ' ')" ;;
-    *) sed -n '5,24p' $0; exit 1 ;;
+    *) sed -n '5,26p' $0; exit 1 ;;
 esac

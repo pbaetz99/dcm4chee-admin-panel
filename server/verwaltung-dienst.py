@@ -32,17 +32,36 @@
 # Dazu nimmt er auf PACS_LOG_SOCKET (Standard /run/pacs-admin/protokoll.sock, Datagramme) die Protokollzeilen von nginx
 # an (access_log syslog, Kennung zugriffe|ereignisse|admin) und legt sie alle 2 Sekunden gesammelt in der Datenbank ab.
 # pacs-storage.sh und dashboard-status.py liegen im selben Verzeichnis wie dieses Skript.
-import datetime, http.server, json, os, pwd, queue, re, socket, socketserver, subprocess, sys, threading, time, urllib.parse
-import firewall, pacsdb
+# Start: both sockets are bound and handed to PACS_SOCKET_UID first, the worker threads start afterwards. Every startup
+# error (library missing, bad number in the environment, socket path too long, not root, a second instance already
+# listening on the socket) ends with ONE line on stderr and exit code 1, no traceback. Do not start the service by hand
+# while pacs-verwaltung.service runs: the second instance refuses to start instead of taking over the socket.
+import datetime, http.server, json, os, pwd, queue, re, signal, socket, socketserver, subprocess, sys, threading, time, urllib.parse
+try:
+    import firewall, pacsdb
+except ImportError as e:   # z. B. libsqlcipher fehlt: die Meldung nennt die Pakete
+    sys.exit("verwaltung-dienst.py: %s" % e)
+
+
+def umgebung_int(name, vorgabe):
+    wert = os.environ.get(name) or str(vorgabe)
+    if not re.fullmatch(r"0|[1-9][0-9]{0,9}", wert):   # int() naehme auch "+5", " 5", "1_0", "007" und andere Ziffernschriften an
+        sys.exit("verwaltung-dienst.py: %s=%s ist keine ganze Zahl ohne fuehrende Null mit hoechstens 10 Stellen (/etc/default/pacs-admin)" % (name, wert))
+    return int(wert)
+
 
 SOCK = os.environ.get("PACS_SOCKET") or "/run/pacs-admin/verwaltung.sock"
 PROTOKOLL_SOCK = os.environ.get("PACS_LOG_SOCKET") or "/run/pacs-admin/protokoll.sock"
-SOCKET_UID = int(os.environ.get("PACS_SOCKET_UID") or 101)
+SOCKET_UID = umgebung_int("PACS_SOCKET_UID", 101)
+if not 0 <= SOCKET_UID < 2 ** 32 - 1:
+    sys.exit("verwaltung-dienst.py: PACS_SOCKET_UID=%d ist keine gueltige uid (/etc/default/pacs-admin)" % SOCKET_UID)
 BIN = os.path.dirname(os.path.abspath(__file__))
 STORAGE = ["/bin/bash", os.path.join(BIN, "pacs-storage.sh")]
 DASHBOARD = [sys.executable, os.path.join(BIN, "dashboard-status.py")]
-GERAET = re.compile(r"/dev/(sd[a-z]+|vd[a-z]+|xvd[a-z]+|nvme[0-9]+n[0-9]+)")   # ganze Platten, keine Partitionen
-PLATTE = re.compile(re.escape(os.environ.get("STORAGE_PREFIX") or "PACS-Data") + r"\d+")
+ZEIT = 300   # Sekunden, die pacs-storage.sh (ausser add) und dashboard-status.py je Aufruf bekommen
+RC_NICHT_NEU_GELADEN = 3   # Exit-Code von pacs-storage.sh: im LDAP geaendert, das Archiv hat die Konfiguration aber nicht neu geladen
+GERAET =re.compile(r"/dev/(sd[a-z]+|vd[a-z]+|xvd[a-z]+|nvme[0-9]+n[0-9]+)")   # ganze Platten, keine Partitionen
+PLATTE = re.compile(re.escape(os.environ.get("STORAGE_PREFIX") or "PACS-Data") + r"[0-9]+")   # \d liesse auch andere Ziffernschriften zu
 QUELLEN = ("zugriffe", "ereignisse", "admin")
 SYSLOG = re.compile(r"<\d+>.{15} (zugriffe|ereignisse|admin): (.*)", re.S)   # nginx: <PRI>Mmm dd hh:mm:ss TAG: MSG
 auftrag = {}
@@ -50,10 +69,32 @@ sperre = threading.Lock()
 eingang = queue.Queue()
 
 
-def socket_frei(pfad):
-    """Verzeichnis anlegen (0755, nginx im Container muss hinein), alten Socket entfernen."""
-    os.makedirs(os.path.dirname(pfad), mode=0o755, exist_ok=True)
+def laeuft_schon(pfad, typ):
+    """Nimmt ein Prozess auf dem Socket Verbindungen an? Eine liegengebliebene Datei ohne Prozess antwortet mit Fehler."""
+    s = socket.socket(socket.AF_UNIX, typ)
+    s.settimeout(2)
+    try:
+        s.connect(pfad)
+        return True
+    except socket.timeout:   # Warteschlange voll: da lauscht jemand
+        return True
+    except OSError:
+        return False
+    finally:
+        s.close()
+
+
+def socket_frei(pfad, typ, name):
+    """Verzeichnis anlegen (0755, nginx im Container muss hinein), alten Socket entfernen. Lauscht noch ein Dienst auf
+    dem Socket, bricht der Start ab: dessen Socket wird nicht entfernt."""
+    if len(os.fsencode(pfad)) > 107:   # sun_path fasst 108 Bytes
+        sys.exit("verwaltung-dienst.py: %s=%s ist zu lang (%d Bytes, Unix-Sockets erlauben hoechstens 107)"
+                 % (name, pfad, len(os.fsencode(pfad))))
+    os.makedirs(os.path.dirname(os.path.abspath(pfad)), mode=0o755, exist_ok=True)
     if os.path.lexists(pfad):
+        if laeuft_schon(pfad, typ):
+            sys.exit("verwaltung-dienst.py: laeuft schon, auf %s lauscht ein Dienst (systemctl status pacs-verwaltung). "
+                     "Nicht von Hand starten, solange der Dienst laeuft." % pfad)
         os.unlink(pfad)
 
 
@@ -62,12 +103,7 @@ def socket_fuer_nginx(pfad):
     os.chmod(pfad, 0o600)
 
 
-def empfangen():
-    s = socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM)
-    socket_frei(PROTOKOLL_SOCK)
-    s.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 8 << 20)
-    s.bind(PROTOKOLL_SOCK)
-    socket_fuer_nginx(PROTOKOLL_SOCK)
+def empfangen(s):
     while True:
         m = SYSLOG.match(s.recv(1 << 20).decode("utf-8", "replace"))
         if m:
@@ -116,10 +152,39 @@ def jetzt():
     return time.strftime("%Y-%m-%dT%H:%M:%S")
 
 
+def lauf(argv, zeit):
+    """Wie subprocess.run(argv, capture_output=True, encoding="utf-8", timeout=zeit), nur ohne den Haenger von Python 3.7
+    (Debian 10, bpo-37424): run() wartet nach dem Abbruch, bis auch ein Enkelprozess (docker exec, tee) die Pipes schliesst,
+    und haelt den Thread bis dahin fest. Darum eigene Sitzung und SIGKILL an die ganze Gruppe. Dieselbe Funktion steht
+    in dashboard-status.py."""
+    p = subprocess.Popen(argv, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE, encoding="utf-8",
+                         errors="replace", start_new_session=True)
+    try:
+        aus, fehler = p.communicate(timeout=zeit)
+    except subprocess.TimeoutExpired:
+        try:
+            os.killpg(p.pid, signal.SIGKILL)
+        except ProcessLookupError:   # schon beendet
+            pass
+        p.stdout.close()   # kein zweites communicate(): ein Enkel ausserhalb der Gruppe haelt die Pipes sonst weiter offen
+        p.stderr.close()
+        try:
+            p.wait(5)
+        except subprocess.TimeoutExpired:   # haengt im Kernel (Zustand D, z. B. eine Platte): nicht darauf warten
+            pass
+        raise subprocess.TimeoutExpired(argv, zeit)
+    return subprocess.CompletedProcess(argv, p.returncode, aus, fehler)
+
+
 def kandidaten():
+    """Leere Platten und naechster Name aus pacs-storage.sh. Bricht das Skript ab (HALT, z. B. wegen eines Fehlers in
+    /etc/default/pacs-admin), kommt dessen Grund als RuntimeError statt einer leeren Liste."""
     platten, name = [], ""
-    for z in subprocess.run(STORAGE + ["kandidaten"], capture_output=True, encoding="utf-8",
-                            timeout=300).stdout.splitlines():
+    r = lauf(STORAGE + ["kandidaten"], ZEIT)
+    if r.returncode:
+        halt = re.search(r"HALT: (.*)", r.stdout)
+        raise RuntimeError(halt.group(1) if halt else "pacs-storage.sh kandidaten ist fehlgeschlagen")
+    for z in r.stdout.splitlines():
         f = z.split()
         if f[:1] == ["kandidat"] and len(f) >= 3 and f[2].isdigit():
             platten.append((f[1], int(f[2])))
@@ -135,7 +200,7 @@ def einrichten(geraet):
         for z in p.stdout:
             auftrag["ausgabe"] += z
         auftrag["rc"] = p.wait()
-        subprocess.run(DASHBOARD, timeout=300)   # neue Platte gleich in der Uebersicht
+        subprocess.run(DASHBOARD, timeout=ZEIT)   # neue Platte gleich in der Uebersicht
     except Exception as e:
         auftrag["ausgabe"] += "\nFEHLER im Dienst: %s\n" % e
         auftrag.setdefault("rc", 1)
@@ -144,6 +209,8 @@ def einrichten(geraet):
 
 
 class Anfrage(http.server.BaseHTTPRequestHandler):
+    timeout = 30   # Sekunden Wartezeit auf Daten: ein Client, der Header oder Body nie fertig schickt, haelt sonst einen Thread fest
+
     def senden(self, code, daten):
         b = daten if isinstance(daten, bytes) else json.dumps(daten, ensure_ascii=False).encode()
         self.send_response(code)
@@ -156,8 +223,10 @@ class Anfrage(http.server.BaseHTTPRequestHandler):
         if self.path.startswith("/admin/dienst/protokoll?") or self.path == "/admin/dienst/protokoll":
             return self.protokoll(urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query))
         if self.path == "/admin/dienst/platten":
-            r = subprocess.run(DASHBOARD, capture_output=True, timeout=300)
-            return self.senden(200 if r.returncode == 0 else 500, {"ok": r.returncode == 0})
+            r = lauf(DASHBOARD, ZEIT)
+            if r.returncode:   # z. B. eine ungueltige Zahl in /etc/default/pacs-admin: der Grund (letzte Zeile) geht an die Seite
+                return self.senden(500, {"ok": False, "fehler": (r.stderr.strip().splitlines() or ["dashboard-status.py ist fehlgeschlagen"])[-1]})
+            return self.senden(200, {"ok": True})
         if self.path == "/admin/dienst/auftrag":
             return self.senden(200, dict(auftrag))
         if self.path in ("/admin/dienst/firewall", "/admin/dienst/firewall?neu=1"):
@@ -174,7 +243,7 @@ class Anfrage(http.server.BaseHTTPRequestHandler):
     def do_POST(self):
         grenze = 65536 if self.path == "/admin/dienst/firewall" else 4096
         try:
-            a = json.loads(self.rfile.read(min(int(self.headers.get("Content-Length") or 0), grenze)))
+            a = json.loads(self.rfile.read(max(0, min(int(self.headers.get("Content-Length") or 0), grenze))))   # negativ hiesse: bis EOF lesen
             if self.path in ("/admin/dienst/freigeben", "/admin/dienst/anhaengen", "/admin/dienst/abhaengen"):
                 platte = a["platte"]
             elif self.path == "/admin/dienst/einrichten":
@@ -197,7 +266,10 @@ class Anfrage(http.server.BaseHTTPRequestHandler):
         with sperre:
             if auftrag.get("laeuft"):
                 return self.senden(409, {"fehler": "Es wird gerade schon eine Platte eingerichtet."})
-            platten, naechste = kandidaten()
+            try:
+                platten, naechste = kandidaten()
+            except RuntimeError as e:   # pacs-storage.sh bricht ab (HALT): der Grund statt "nicht mehr als leer erkannt"
+                return self.senden(409, {"fehler": str(e)})
             if (geraet, groesse) not in platten or name != naechste:
                 return self.senden(409, {"fehler": "Die Platte ist nicht mehr genau so als leer erkannt. Bitte neu suchen."})
             auftrag.clear()
@@ -209,9 +281,11 @@ class Anfrage(http.server.BaseHTTPRequestHandler):
     def storage(self, modus, platte):   # modus: freigeben | anhaengen | abhaengen
         if not PLATTE.fullmatch(str(platte)):
             return self.senden(400, {"fehler": "keine PACS-Platte"})
-        r = subprocess.run(STORAGE + [modus, platte, "ja"], capture_output=True, encoding="utf-8",
-                           errors="replace", timeout=300)
-        subprocess.run(DASHBOARD, timeout=300)
+        r = lauf(STORAGE + [modus, platte, "ja"], ZEIT)
+        subprocess.run(DASHBOARD, timeout=ZEIT)
+        if r.returncode == RC_NICHT_NEU_GELADEN:   # steht im LDAP, gilt im Archiv aber erst nach "Neu laden": nicht als "nichts getan" melden
+            achtung = re.search(r"ACHTUNG: (.*)", r.stdout)
+            return self.senden(500, {"fehler": achtung.group(1) if achtung else "Das Archiv hat die Konfiguration nicht neu geladen, siehe Log von pacs-storage.sh"})
         if r.returncode:
             halt = re.search(r"HALT: (.*)", r.stdout)
             return self.senden(409, {"fehler": halt.group(1) if halt else "nicht ausgeführt, siehe Log von pacs-storage.sh"})
@@ -224,24 +298,34 @@ class Anfrage(http.server.BaseHTTPRequestHandler):
             von = datetime.date.fromisoformat(q["von"][0]) if "von" in q else heute - datetime.timedelta(days=30)
             bis = datetime.date.fromisoformat(q["bis"][0]) if "bis" in q else heute
             letzte = max(0, min(int(q.get("letzte", ["0"])[0]), 1000))   # negativ hiesse in SQLite: alle
-        except ValueError:
+            ab, vor = time.mktime(von.timetuple()), time.mktime((bis + datetime.timedelta(days=1)).timetuple())   # bis=9999-12-31: OverflowError
+        except (ValueError, OverflowError):
             return self.senden(400, {"fehler": "Datum JJJJ-MM-TT, letzte als Zahl"})
         if not quellen:
             return self.senden(400, {"fehler": "unbekannte Quelle"})
         wo = "quelle in (%s)" % ",".join("?" * len(quellen))
-        with pacsdb.Db() as db:
-            if letzte:
-                zeilen = db.abfrage("select zeile from (select zeile, zeit, id from protokoll where %s order by zeit desc, id desc "
-                                    "limit ?) order by zeit, id" % wo, quellen + [letzte])
-            else:
-                zeilen = db.abfrage("select zeile from protokoll where %s and zeit >= ? and zeit < ? order by zeit, id" % wo,
-                                    quellen + [time.mktime(von.timetuple()), time.mktime((bis + datetime.timedelta(days=1)).timetuple())])
+        try:
+            with pacsdb.Db() as db:
+                if letzte:
+                    zeilen = db.abfrage("select zeile from (select zeile, zeit, id from protokoll where %s order by zeit desc, id desc "
+                                        "limit ?) order by zeit, id" % wo, quellen + [letzte])
+                else:
+                    zeilen = db.abfrage("select zeile from protokoll where %s and zeit >= ? and zeit < ? order by zeit, id" % wo,
+                                        quellen + [ab, vor])
+        except (ValueError, RuntimeError, OSError) as e:   # Schluessel oder Datenbank unbrauchbar: Antwort statt abgebrochener Verbindung
+            return self.senden(503, {"fehler": "Protokoll: %s" % e})
         b = "\n".join(z for (z,) in zeilen).encode()
         self.send_response(200)
         self.send_header("Content-Type", "application/x-ndjson; charset=utf-8")
         self.send_header("Content-Length", str(len(b)))
         self.end_headers()
         self.wfile.write(b)
+
+    def handle_one_request(self):
+        try:
+            super().handle_one_request()
+        except subprocess.TimeoutExpired as e:   # pacs-storage.sh oder dashboard-status.py haengt: Antwort statt abgebrochener Verbindung
+            self.senden(504, {"fehler": "%s antwortet nicht (nach %d s abgebrochen), Zustand pruefen" % (os.path.basename(str(e.cmd[1])), e.timeout)})
 
     def log_message(self, *args):   # nginx protokolliert jede Anfrage mit Konto
         pass
@@ -251,17 +335,58 @@ class Dienst(socketserver.ThreadingMixIn, socketserver.UnixStreamServer):
     daemon_threads = True
 
 
-# Die Sockets schuetzt nur die uid. Gehoert sie auf dem Host einem Konto, erreicht jeder Prozess dieses Kontos den Dienst.
-try:
-    print("Achtung: PACS_SOCKET_UID %d ist auf dem Host das Konto %s. Jeder Prozess dieses Kontos kann das Protokoll lesen "
-          "und die Firewall aendern. Ist das nicht nginx, siehe docs/install.md Schritt 6."
-          % (SOCKET_UID, pwd.getpwuid(SOCKET_UID).pw_name), file=sys.stderr, flush=True)
-except KeyError:
-    pass
-threading.Thread(target=empfangen, daemon=True).start()
-threading.Thread(target=ablegen, daemon=True).start()
-threading.Thread(target=absender_takt, daemon=True).start()
-socket_frei(SOCK)
-dienst = Dienst(SOCK, Anfrage)
-socket_fuer_nginx(SOCK)
-dienst.serve_forever()
+def sockets_binden():
+    """Beide Sockets anlegen und an PACS_SOCKET_UID uebergeben, bevor ein Thread startet (ein Fehler beendet dann nur
+    den Hauptthread, auf Python 3.13 sonst mit "Fatal Python error" und Core-Dump). Ergebnis: (Protokoll-Socket, Dienst)."""
+    s = None
+    try:
+        socket_frei(SOCK, socket.SOCK_STREAM, "PACS_SOCKET")   # erst beide pruefen (lebt ein Dienst, bricht der Start ab; liegengebliebene Dateien werden geraeumt), dann binden
+        socket_frei(PROTOKOLL_SOCK, socket.SOCK_DGRAM, "PACS_LOG_SOCKET")
+        s = socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM)
+        s.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 8 << 20)
+        s.bind(PROTOKOLL_SOCK)
+        socket_fuer_nginx(PROTOKOLL_SOCK)
+        dienst = Dienst(SOCK, Anfrage)
+        socket_fuer_nginx(SOCK)
+    except PermissionError as e:
+        if s:
+            s.close()
+        sys.exit("verwaltung-dienst.py: keine Berechtigung (%s: %s). Der Dienst muss als root laufen (pacs-verwaltung.service)."
+                 % (e.strerror, e.filename or os.path.dirname(PROTOKOLL_SOCK)))
+    except OSError as e:
+        if s:
+            s.close()
+        sys.exit("verwaltung-dienst.py: Socket nicht anlegbar: %s" % e)
+    return s, dienst
+
+
+def main():
+    # Die Sockets schuetzt nur die uid. Gehoert sie auf dem Host einem Konto, erreicht jeder Prozess dieses Kontos den Dienst.
+    try:
+        print("Achtung: PACS_SOCKET_UID %d ist auf dem Host das Konto %s. Jeder Prozess dieses Kontos kann das Protokoll lesen "
+              "und die Firewall aendern. Ist das nicht nginx, siehe docs/install.de.md#helper-service."
+              % (SOCKET_UID, pwd.getpwuid(SOCKET_UID).pw_name), file=sys.stderr, flush=True)
+    except KeyError:
+        pass
+    empfangssocket, dienst = sockets_binden()
+    try:   # Schluessel fehlt oder passt nicht: gleich melden, nicht erst bei der ersten Protokollzeile (Dienst laeuft trotzdem)
+        with pacsdb.Db():
+            pass
+    except Exception as e:
+        print("Achtung: Protokoll-Datenbank nicht nutzbar, die Zeilen von nginx werden zurueckgehalten und alle 10 s neu "
+              "abgelegt: %s" % e, file=sys.stderr, flush=True)
+    threading.Thread(target=empfangen, args=(empfangssocket,), daemon=True).start()
+    threading.Thread(target=ablegen, daemon=True).start()
+    threading.Thread(target=absender_takt, daemon=True).start()
+    print("pacs-verwaltung bereit: %s (HTTP) und %s (Protokoll), Besitzer uid %d" % (SOCK, PROTOKOLL_SOCK, SOCKET_UID), flush=True)
+    try:
+        dienst.serve_forever()
+    except KeyboardInterrupt:   # Threads laufen noch: normales Beenden loest auf Python 3.13 "Fatal Python error" aus
+        for pfad in (SOCK, PROTOKOLL_SOCK):
+            if os.path.lexists(pfad):
+                os.unlink(pfad)
+        os._exit(0)
+
+
+if __name__ == "__main__":
+    main()

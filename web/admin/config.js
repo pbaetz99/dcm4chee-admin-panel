@@ -7,8 +7,12 @@ window.PACS_ADMIN = {
   dcm4cheeUrl: '/dcm4chee-arc/ui2/',    // Verweis "dcm4chee" im Kopf, leer = ausblenden
   viewerUrl: '/',                       // Verweis "Viewer" im Kopf, leer = ausblenden
   logo: '',                             // Logo (hell, fuer dunklen Grund) von derselben Adresse, z. B. '/pacs-logo.svg'
-                                        // (docker-compose.example.yml); von einem anderen Server laedt es nicht
+                                        // (deploy/compose/docker-compose.oauth2.example.yml); von einem anderen Server laedt es nicht
                                         // (require-corp). Leer = nur Text
   locale: 'de-DE',                      // Zahlen und Zeitpunkte, z. B. 'de-AT' oder 'de-CH'; DICOM-Datum (Studie,
                                         // Geburt) immer TT.MM.JJJJ; ungueltig = de-DE
+  kontoUrl: '/oauth2/userinfo',         // Konto im Kopf: Adresse, die JSON mit preferredUsername oder email liefert (oauth2-proxy;
+                                        // bei Basic-Auth und ohne Anmeldung liefert nginx dieselbe Form). Leer = kein Konto anzeigen
+  abmeldenUrl: '',                      // Verweis "Abmelden" im Kopf, leer = ausblenden. Mit oauth2-proxy z. B. '/oauth2/sign_out';
+                                        // mit Basic-Auth gibt es kein Abmelden (nur den Browser schliessen)
 };
